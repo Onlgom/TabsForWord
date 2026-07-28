@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <OutputType>Library</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>7.3</LangVersion>
+    <Platforms>AnyCPU</Platforms>
+    <RootNamespace>TabsForWord</RootNamespace>
+    <AssemblyName>TabsForWord</AssemblyName>
+    <Version>1.7.2</Version>
+    <Company>TabsForWord</Company>
+    <Product>Tabs for Microsoft Word</Product>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+
+    <!-- A distributed build must not carry the absolute paths of the machine it
+         was built on: the Release DLL used to embed the full path to its .pdb,
+         so the user name of whoever built it travelled with every copy that was
+         handed out. PathMap rewrites the build root out of the metadata, and an
+         embedded PDB removes the reference to an external file altogether -
+         as a bonus it gives line numbers in the stack traces that reach us from
+         the field, with nothing extra to ship. -->
+    <DebugType>embedded</DebugType>
+    <PathMap>$(MSBuildThisFileDirectory)=TabsForWord/</PathMap>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <!-- The genuine Microsoft PIAs from the GAC (installed together with Office/C2R).
+       EmbedInteropTypes: the types actually used are embedded into TabsForWord.dll
+       (NoPIA), so these DLLs are not needed at runtime on the user machine. -->
+  <ItemGroup>
+    <WordPia Include="$(WINDIR)\assembly\GAC_MSIL\Microsoft.Office.Interop.Word\**\Microsoft.Office.Interop.Word.dll" />
+    <OfficePia Include="$(WINDIR)\assembly\GAC_MSIL\office\**\office.dll" />
+  </ItemGroup>
+
+  <Target Name="CheckPias" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="'@(WordPia)' == ''" Text="The Microsoft.Office.Interop.Word PIA was not found in the GAC. Is Microsoft Office installed?" />
+    <Error Condition="'@(OfficePia)' == ''" Text="The office.dll PIA was not found in the GAC. Is Microsoft Office installed?" />
+  </Target>
+
+  <ItemGroup>
+    <Reference Include="Microsoft.Office.Interop.Word">
+      <HintPath>@(WordPia)</HintPath>
+      <EmbedInteropTypes>true</EmbedInteropTypes>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="office">
+      <HintPath>@(OfficePia)</HintPath>
+      <EmbedInteropTypes>true</EmbedInteropTypes>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

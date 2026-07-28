@@ -1,0 +1,20 @@
+# Build outputs
+bin/
+obj/
+*.user
+*.suo
+
+# dotnet / NuGet
+packages/
+*.nupkg
+.vs/
+
+# Logs and temp
+*.log
+*.tmp
+~$*
+
+# Build artifacts are not published: release/ is produced by
+# scripts\build-release.ps1, and the ready-to-install ZIP lives on the
+# Releases page of this repository.
+release/
