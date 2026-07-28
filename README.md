@@ -6,6 +6,11 @@ browser.
 
 *Читать по-русски: [README.ru.md](README.ru.md).*
 
+![The tab bar inside the Word window](docs/images/tab-bar.png)
+
+*Four documents, one bar: the first tab is pinned, the third one is coloured, the
+active one shows the amber dot of unsaved changes.*
+
 Since version 1.6.0 the tab bar lives **inside the Word window**, right below
 the ribbon, with no Custom Task Pane title strip above it (decision
 [ADR-015](docs/DECISIONS.md); how it works:
@@ -36,6 +41,14 @@ picked by hand in Settings (ADR-016).
 - A ▾ menu listing every tab with a search box, and a Settings window.
 - Ctrl+Tab / Ctrl+Shift+Tab to switch tabs (can be turned off).
 - Per-monitor DPI: the bar scales with the monitor the window is on.
+
+![The all-tabs menu](docs/images/all-tabs-menu.png)
+
+*The ▾ menu lists every open document and filters them as you type.*
+
+![The tab context menu](docs/images/tab-menu.png)
+
+*Right-click a tab for closing, pinning, the colour and the size.*
 
 ## For users
 
