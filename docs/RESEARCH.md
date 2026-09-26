@@ -98,8 +98,9 @@ and installing the full VS means gigabytes and manual confirmations.
 - When a window closes, Word destroys its CTP itself; our RCW goes "dead" (a
   COMException on any access) and there is NO event about it - we need our own
   tracking and cleanup (a probe inside try/catch plus Marshal.ReleaseComObject).
-- Protected View windows get no CTP (add-ins do not run there) - the tab appears
-  after "Enable Editing".
+- Protected View windows get no CTP (add-ins do not run there). The add-in still
+  lists a PV document as a grey tab in the strips of ordinary windows; after
+  "Enable Editing" it becomes an ordinary tab (KNOWN_ISSUES O3).
 
 ## Word object model events
 
@@ -126,7 +127,9 @@ The conclusions that shaped the tab model:
   catch, leaving the tab in place. NEVER call wdDoNotSaveChanges.
 - Switching: `Window.Activate()` plus P/Invoke `SetForegroundWindow(Window.Hwnd)`
   (the click happens in our process, so we are allowed to set the foreground); if
-  the window is minimised, restore WindowState first.
+  the window is minimised, restore it first. (Since v1.7.3 the restore is
+  WM_SYSCOMMAND/SC_RESTORE rather than `WindowState = Normal`: the COM route
+  turned a window that had been maximised into an ordinary one - ADR-018.)
 - Protected View: its own family of six events (ProtectedViewWindowOpen/…/
   BeforeClose with a CloseReason; wdProtectedViewCloseEdit is followed by
   DocumentOpen - convert the tab rather than removing it). PV documents are not
@@ -139,7 +142,8 @@ The conclusions that shaped the tab model:
 
 ## Building without Visual Studio - verified in practice on this machine
 
-- `dotnet build` (SDK 8.0.423, user scope) builds an SDK-style `net48` project
+- `dotnet build` (SDK 8.0.423, user scope; 8.0.425 since 2026-09-26, see
+  ENVIRONMENT.md) builds an SDK-style `net48` project
   with `UseWindowsForms=true` without VS; the reference assemblies come from the
   Microsoft.NETFramework.ReferenceAssemblies package automatically.
   **Verdict: CONFIRMED, and a local build succeeded (0 errors).**
@@ -189,18 +193,56 @@ The conclusions that shaped the tab model:
   `powershell -NoProfile -ExecutionPolicy Bypass -File`, so that a double click
   works under any ExecutionPolicy.
 
+## Word AutoSave and window switching (2026-09-26)
+
+**The question:** the user reported that with AutoSave on, every edit got saved as
+soon as they switched to another document (the unsaved dot disappears, and the
+switch away from such a tab lags). They meant the "AutoSave" toggle in the Word
+title bar, which applies to OneDrive/SharePoint files. Is the add-in causing the
+save?
+
+**The code:** no. The add-in never calls Save/SaveAs on a document and never
+cancels a save; `DocumentBeforeSave` only schedules a reconcile.
+
+**The experiment** (Word M365 x64 16.0.20326, v1.7.2): two temporary test
+documents were created in the user's OneDrive with their permission and deleted
+afterwards; Word opened them as cloud documents with AutoSave on. Each
+repetition: type 3 characters, wait 250 ms, switch to the other document, poll
+`Document.Saved`.
+
+| How the switch was made | Saved after the switch |
+|---|---|
+| no switch (baseline) | 1 of 4 repetitions saved after 7.4 s; 3 of 4 not saved within 12 s |
+| a tab click (the add-in) | 219-312 ms (4/4) |
+| Alt+Tab | 218-281 ms (4/4); the target window comes to the front only after the save |
+| SetForegroundWindow from outside Word | 0-15 ms (3/3) |
+| Word's own `Window.Activate` (COM, from outside) | 125 ms (3/3) |
+| Alt+Tab with the add-in DISCONNECTED (`COMAddIns(...).Connect = False`) | 218-234 ms (3/3) |
+
+**Conclusion:** Word's AutoSave saves a changed cloud document as soon as its
+window loses activation, synchronously - whatever does the switching, with or
+without the add-in; the next window comes forward only after that save, which is
+the lag the user notices. Left alone, the same edit was usually not saved within
+12 s. The add-in cannot prevent it without turning AutoSave off, and it must not
+change how the user's documents are saved behind their back. Documented as
+limitation O21 with what the user can do: turn the "AutoSave" toggle off for the
+document (Word remembers it per file) or for all cloud files (File > Options >
+Save), and save with Ctrl+S. AutoRecover is a different feature: it keeps
+recovery copies and never overwrites the document file.
+
 ## What was researched -> what question arose -> the decision (summary)
 
 | Question | Decision | Reason |
 |---|---|---|
 | Real tabs in one window? | No; synchronised strips in every window | MDI removed, no API, reparenting dangerous and unsupportable |
 | VSTO or a COM add-in? | A COM add-in (IDTExtensibility2) | VSTO cannot be built here and needs the Runtime; the COM route was verified on the machine |
-| The UI host of the strip? | A Custom Task Pane, msoCTPDockPositionTop | The official mechanism; top docking confirmed |
+| The UI host of the strip? | A Custom Task Pane, msoCTPDockPositionTop (superseded in v1.6.0 by our own window inside the Word window, ADR-015; the CTP stays as the fallback) | The official mechanism; top docking confirmed |
 | The UI framework? | A WinForms UserControl | Required by CreateCTP (the ProgID of a COM class); WinForms is simpler for ActiveX hosting |
 | The runtime? | .NET Framework 4.8 (net48) | Already on every Windows 10/11; CLR v4.0.30319 is what the mscoree registration requires |
 | The build? | dotnet 8 SDK (user scope) | Verified: net48 + WinForms builds without VS |
 | Interop? | The NuGet Word PIA (embedded) plus hand-written ComImport interfaces | There is no official office.dll on NuGet; NoPIA removes the runtime dependency |
 | Registration / installation? | A PowerShell script, HKCU, 64-bit registry | No administrator rights; verified end to end |
+| Does the add-in cause the AutoSave save on a switch? (2026-09-26) | No; Word does it on any deactivation - documented (O21), AutoSave is left alone | Measured with and without the add-in: the same ~0.2-0.3 s save |
 
 ## Sources (the main ones)
 

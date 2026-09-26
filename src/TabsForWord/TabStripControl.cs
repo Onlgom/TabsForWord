@@ -65,6 +65,7 @@ namespace TabsForWord
         private float _userScale = TabSizeSettings.Current;  // tab size (a multiplier on top of DPI)
         private Color? _panelBgOverride;   // in-window mode: strip background in the Word background colour
         private bool _activeFlushBottom;   // in-window mode: the active fill stops at the strip line
+        private bool _noActivateOnTabPress; // in-window mode: a press on a tab does not activate this window
 
         // Fonts (recreated when the DPI changes)
         private Font _fontTab;          // Segoe UI 12.5 px
@@ -110,6 +111,12 @@ namespace TabsForWord
         private bool _mouseDownLeft;
         private Point _mouseDownPt;
         private Hit _mouseDownHit;
+        private Hit _mouseDownMiddleHit;
+        private Hit _mouseDownRightHit;
+        private Hit _activationHit;         // the hit at WM_MOUSEACTIVATE, before any re-layout
+        private Point _activationHitPt;
+        private int _activationHitTick;
+        private bool _activationHitValid;
         private bool _dragging;
         private int _dragHwnd;
         private int _dragGrabOffsetX;
@@ -186,6 +193,30 @@ namespace TabsForWord
             if (_activeFlushBottom == value) return;
             _activeFlushBottom = value;
             Invalidate();
+        }
+
+        /// <summary>
+        /// In-window mode: a left press on a tab body must not activate the Word window
+        /// the strip lives in (see WM_MOUSEACTIVATE in WndProc). The window the tab stands
+        /// for is activated by the manager once the click is over.
+        /// </summary>
+        public void SetNoActivateOnTabPress(bool value)
+        {
+            _noActivateOnTabPress = value;
+        }
+
+        /// <summary>
+        /// The WM_MOUSEACTIVATE decision (separate for the unit tests): suppress the
+        /// activation for a left or middle press on a tab body - the left one switches,
+        /// the middle one closes, and neither needs the strip's own window in front. The
+        /// close box, the buttons, the empty space and the right button keep the usual
+        /// activation: the context menu needs its window in front.
+        /// </summary>
+        internal bool ShouldSuppressMouseActivation(Point client, int mouseMsg)
+        {
+            if (!_noActivateOnTabPress || _collapsed) return false;
+            if (mouseMsg != WM_LBUTTONDOWN && mouseMsg != WM_LBUTTONDBLCLK && mouseMsg != WM_MBUTTONDOWN) return false;
+            return HitTest(client).Kind == HitKind.Tab;
         }
 
         /// <summary>Collapse or expand the strip (the CTP height is changed by TabPaneManager).</summary>
@@ -581,6 +612,19 @@ namespace TabsForWord
         /// Test-only: [visible zone, left arrow, right arrow] in scrolling mode;
         /// an empty array means there is no overflow.
         /// </summary>
+        /// <summary>For the unit tests: the tab bodies in strip order, then the "+" button.</summary>
+        internal Rectangle[] TabGeometryForTests()
+        {
+            using (var g = CreateGraphics())
+            {
+                var lay = ComputeLayout(g, _tabs);
+                var result = new List<Rectangle>();
+                foreach (var tl in lay.Tabs) result.Add(tl.Bounds);
+                result.Add(lay.Plus);
+                return result.ToArray();
+            }
+        }
+
         internal Rectangle[] OverflowGeometryForTests()
         {
             using (var g = CreateGraphics())
@@ -1363,6 +1407,15 @@ namespace TabsForWord
             base.OnMouseMove(e);
             try
             {
+                // A press whose button-up never reached us (the capture was taken away, the
+                // host was hidden during the press): without this, plain hovering would
+                // start a phantom drag and swallow the next real click.
+                if (_mouseDownLeft && (e.Button & MouseButtons.Left) == 0)
+                {
+                    CancelDrag();
+                    Invalidate();
+                }
+
                 if (_mouseDownLeft && _mouseDownHit.Kind == HitKind.Tab)
                 {
                     if (!_dragging && Math.Abs(e.X - _mouseDownPt.X) > S(DragThreshold))
@@ -1395,12 +1448,40 @@ namespace TabsForWord
             Invalidate();
         }
 
-        protected override void OnMouseDown(MouseEventArgs e)
+        protected override void OnMouseCaptureChanged(EventArgs e)
         {
-            base.OnMouseDown(e);
+            base.OnMouseCaptureChanged(e);
             try
             {
-                var hit = HitTest(e.Location);
+                // WinForms drops the capture itself only AFTER OnMouseUp (the press is already
+                // cleared by then). Losing it while the button is still held means the gesture
+                // was interrupted (a popup, another window took the capture).
+                if (_mouseDownLeft && !Capture)
+                {
+                    CancelDrag();
+                    Invalidate();
+                }
+            }
+            catch (Exception ex)
+            {
+                LoggingService.Error("OnMouseCaptureChanged failed", ex);
+            }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            // In the in-window mode NO base.OnMouseDown: UserControl.OnMouseDown puts the
+            // keyboard focus on the strip (SetFocus), which took the focus away from Word's
+            // document on every press and, in a Word window that was not active, activated
+            // that window - the tabs then re-laid out under the cursor and the click landed
+            // on a neighbouring tab (reproduced: 3 misses in 30 clicks on the strip of a
+            // background window). Nothing subscribes to the MouseDown event of the strip.
+            // The classic Custom Task Pane keeps the old behaviour.
+            if (!_noActivateOnTabPress) base.OnMouseDown(e);
+            try
+            {
+                if (e.Button == MouseButtons.Left && _dragging) CancelDrag();   // a stale gesture
+                var hit = TakePressHit(e.Location);
                 if (e.Button == MouseButtons.Left)
                 {
                     _mouseDownLeft = true;
@@ -1412,7 +1493,21 @@ namespace TabsForWord
                         int idx = _tabs.FindIndex(t => t.Hwnd == hit.Hwnd);
                         if (idx >= 0) _focusIndex = idx;
                     }
+                    // The keyboard route to the strip (arrows, Home/End, Enter - section 9)
+                    // stays: a press on empty space or a scroll arrow of the window in front
+                    // focuses the strip, as it always did. Tabs, the x and the buttons do not.
+                    if (_noActivateOnTabPress && !Focused && IsStripWindowInFront() &&
+                        (hit.Kind == HitKind.Empty || hit.Kind == HitKind.ScrollLeft || hit.Kind == HitKind.ScrollRight))
+                        Focus();
                     Invalidate();
+                }
+                else if (e.Button == MouseButtons.Middle)
+                {
+                    _mouseDownMiddleHit = hit;
+                }
+                else if (e.Button == MouseButtons.Right)
+                {
+                    _mouseDownRightHit = hit;
                 }
             }
             catch (Exception ex)
@@ -1430,41 +1525,88 @@ namespace TabsForWord
 
                 if (e.Button == MouseButtons.Left)
                 {
+                    bool wasPressed = _mouseDownLeft;
+                    var down = _mouseDownHit;
                     _mouseDownLeft = false;
                     _pressed = new Hit { Kind = HitKind.None };
 
                     if (_dragging)
                     {
-                        CommitDrag();
+                        // A "drag" that ended back where it started is a click with a shaky hand
+                        // (a touchpad tap, a mouse that moved a few pixels): activate the tab.
+                        // A real drag that the pin rule snapped back is not a click.
+                        bool reordered = CommitDrag();
+                        bool nearPress = Math.Abs(e.X - _mouseDownPt.X) <= S(DragThreshold) * 3 &&
+                                         Math.Abs(e.Y - _mouseDownPt.Y) <= S(DragThreshold) * 3;
+                        if (!reordered && wasPressed && nearPress && down.Kind == HitKind.Tab)
+                            PerformLeftClick(down);
                         Invalidate();
                         return;
                     }
 
-                    if (hit.Same(_mouseDownHit))
+                    if (wasPressed && hit.Same(down))
                         PerformLeftClick(hit);
                     Invalidate();
                     return;
                 }
 
-                if (e.Button == MouseButtons.Middle && hit.Kind == HitKind.Tab)
+                if (e.Button == MouseButtons.Middle)
                 {
-                    // Middle button closes (section 8)
-                    var close = TabCloseRequested;
-                    if (close != null) close(hit.Hwnd);
+                    // Middle button closes (section 8) - only the tab that was both pressed
+                    // and released: a tab that moved under the cursor is never closed instead.
+                    var down = _mouseDownMiddleHit;
+                    _mouseDownMiddleHit = new Hit { Kind = HitKind.None };
+                    if (hit.Kind == HitKind.Tab && hit.Same(down))
+                    {
+                        var close = TabCloseRequested;
+                        if (close != null) close(hit.Hwnd);
+                    }
                     return;
                 }
 
-                if (e.Button == MouseButtons.Right &&
-                    (hit.Kind == HitKind.Tab || hit.Kind == HitKind.TabClose))
+                if (e.Button == MouseButtons.Right)
                 {
-                    var tab = _tabs.FirstOrDefault(t => t.Hwnd == hit.Hwnd);
-                    if (tab != null) ShowTabContextMenu(tab, e.Location);
+                    // The menu is for the tab that was PRESSED: a right press in a background
+                    // window activates it, and the tabs may shift before the button is released.
+                    var down = _mouseDownRightHit;
+                    _mouseDownRightHit = new Hit { Kind = HitKind.None };
+                    if (down.Kind == HitKind.Tab || down.Kind == HitKind.TabClose)
+                    {
+                        var tab = _tabs.FirstOrDefault(t => t.Hwnd == down.Hwnd);
+                        if (tab != null) ShowTabContextMenu(tab, e.Location);
+                    }
                 }
             }
             catch (Exception ex)
             {
                 LoggingService.Error("OnMouseUp failed", ex);
             }
+        }
+
+        /// <summary>
+        /// The hit of a press. If the press activated a background Word window, the tabs
+        /// have already been laid out again by the time WM_xBUTTONDOWN arrives; the hit
+        /// taken at WM_MOUSEACTIVATE, on the layout the user was looking at, wins then.
+        /// </summary>
+        private Hit TakePressHit(Point location)
+        {
+            var hit = HitTest(location);
+            if (_activationHitValid)
+            {
+                _activationHitValid = false;
+                if (Math.Abs(location.X - _activationHitPt.X) <= 2 && Math.Abs(location.Y - _activationHitPt.Y) <= 2 &&
+                    unchecked(Environment.TickCount - _activationHitTick) < 1000)
+                    hit = _activationHit;
+            }
+            return hit;
+        }
+
+        /// <summary>Is the Word window this strip lives in the foreground window?</summary>
+        private bool IsStripWindowInFront()
+        {
+            if (!IsHandleCreated) return false;
+            var root = NativeHost.NativeWin32.GetAncestor(Handle, NativeHost.NativeWin32.GA_ROOT);
+            return root != IntPtr.Zero && root == NativeHost.NativeWin32.GetForegroundWindow();
         }
 
         private void PerformLeftClick(Hit hit)
@@ -1625,7 +1767,8 @@ namespace TabsForWord
             order.AddRange(result);
         }
 
-        private void CommitDrag()
+        /// <summary>Ends the drag; true if the tab really moved (a reorder was requested).</summary>
+        private bool CommitDrag()
         {
             int hwnd = _dragHwnd;
             int from = _tabs.FindIndex(t => t.Hwnd == hwnd);
@@ -1635,7 +1778,9 @@ namespace TabsForWord
             {
                 var reorder = ReorderRequested;
                 if (reorder != null) reorder(hwnd, to);
+                return true;
             }
+            return false;
         }
 
         private void CancelDrag()
@@ -2172,11 +2317,69 @@ namespace TabsForWord
         private const int WM_DPICHANGED_BEFOREPARENT = 0x02E2;
         private const int WM_DPICHANGED_AFTERPARENT = 0x02E3;
         private const int WM_MOUSEHWHEEL = 0x020E;
+        private const int WM_MOUSEACTIVATE = 0x0021;
+        private const int WM_POINTERACTIVATE = 0x024B;
+        private const int WM_LBUTTONDOWN = 0x0201;
+        private const int WM_LBUTTONDBLCLK = 0x0203;
+        private const int WM_MBUTTONDOWN = 0x0207;
+        private const int MA_NOACTIVATE = 3;
+        private const int PA_NOACTIVATE = 3;
+
+        private void RememberActivationHit(Point client)
+        {
+            _activationHit = HitTest(client);
+            _activationHitPt = client;
+            _activationHitTick = Environment.TickCount;
+            _activationHitValid = true;
+        }
+
+        /// <summary>Screen position of the message being processed (the press).</summary>
+        private static Point MessagePosition()
+        {
+            uint pos = NativeHost.NativeWin32.GetMessagePos();
+            return new Point(unchecked((short)(pos & 0xFFFF)), unchecked((short)(pos >> 16)));
+        }
+
+        /// <summary>Where the finger or pen touched; the message position if that cannot be read.</summary>
+        private static Point PointerPosition(IntPtr wParam)
+        {
+            Point p;
+            if (NativeHost.NativeWin32.TryGetPointerPixelLocation((uint)((long)wParam & 0xFFFF), out p)) return p;
+            return MessagePosition();
+        }
 
         protected override void WndProc(ref Message m)
         {
             try
             {
+                // A press on a tab in a Word window that is NOT active: without this the
+                // press would activate that window first (DefWindowProc passes the message
+                // up to OpusApp), its tab would become the active one and grow wider, and the
+                // tabs would shift under the cursor before the click was resolved. The press
+                // itself is still delivered; the window the tab stands for is activated on
+                // release.
+                if (m.Msg == WM_MOUSEACTIVATE)
+                {
+                    int mouseMsg = (int)(((long)m.LParam >> 16) & 0xFFFF);
+                    var client = PointToClient(MessagePosition());
+                    RememberActivationHit(client);
+                    if (ShouldSuppressMouseActivation(client, mouseMsg))
+                    {
+                        m.Result = (IntPtr)MA_NOACTIVATE;
+                        return;
+                    }
+                }
+                // The same for a finger or a pen (Windows sends this instead for touch input).
+                if (m.Msg == WM_POINTERACTIVATE)
+                {
+                    var client = PointToClient(PointerPosition(m.WParam));
+                    RememberActivationHit(client);
+                    if (ShouldSuppressMouseActivation(client, WM_LBUTTONDOWN))
+                    {
+                        m.Result = (IntPtr)PA_NOACTIVATE;
+                        return;
+                    }
+                }
                 // The scale is driven by the strip owner (SetDpiOverride from the DPI of the
                 // Word window) - the WinForms auto-response to a DPI change resized the
                 // control and drove DeviceDpi at the wrong moments on multi-monitor setups.

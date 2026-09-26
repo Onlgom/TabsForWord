@@ -1,7 +1,8 @@
 # Environment (stage 0)
 
 Checked on: 2026-07-23. This records the development machine the add-in was
-built on, and why the build does not need Visual Studio.
+built on, and why the build does not need Visual Studio. The tables below are
+the stage-0 snapshot; what changed later is under "Changes since stage 0".
 
 ## System
 
@@ -55,7 +56,8 @@ built on, and why the build does not need Visual Studio.
 - [x] Established that VS/VSTO are not required once the COM add-in architecture
       is chosen (see docs/RESEARCH.md and docs/DECISIONS.md).
 - [x] Installed the .NET SDK **8.0.423** (user scope, no administrator rights):
-      `%LOCALAPPDATA%\Microsoft\dotnet\dotnet.exe`
+      `%LOCALAPPDATA%\Microsoft\dotnet\dotnet.exe` (reinstalled as 8.0.425 on
+      2026-09-26, see below)
 - [x] Build smoke test: an SDK-style `net48` project with `UseWindowsForms=true`
       and the `Microsoft.NETFramework.ReferenceAssemblies` package builds
       successfully (0 errors).
@@ -63,3 +65,16 @@ built on, and why the build does not need Visual Studio.
       (OneNote.WordAddinTakeNotesService, PDFMaker.OfficeAddin under
       HKCU\...\Word\Addins) and that no restrictive Trust Center policy is in
       place - so the COM add-in mechanism itself is available.
+
+## Changes since stage 0
+
+- **Word** (Microsoft 365 x64, Click-to-Run) updates itself; as of 2026-09-26
+  it is build **16.0.20326**. The add-in log records the current build in its
+  "Environment:" line at every start, so take the value from there rather than
+  from this file.
+- **.NET SDK:** the user-scope SDK in `%LOCALAPPDATA%\Microsoft\dotnet` had
+  been removed from the machine. On 2026-09-26, with the user's permission,
+  SDK **8.0.425** was reinstalled into the same folder with the official
+  `dotnet-install.ps1` (user scope, no administrator rights, about 285 MB
+  downloaded). The build commands are unchanged.
+- The OS is still Windows 11 Pro, build 26200 (x64).

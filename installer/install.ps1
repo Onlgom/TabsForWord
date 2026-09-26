@@ -236,10 +236,14 @@ function Invoke-Install {
     $winBuild = 0
     try {
         $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+        # The registry ProductName still says "Windows 10" on Windows 11; the build number
+        # tells them apart (Windows 11 starts at build 22000).
+        $productName = [string]$cv.ProductName
+        try { if ([int]$cv.CurrentBuild -ge 22000) { $productName = $productName -replace 'Windows 10', 'Windows 11' } } catch { }
         try { $winBuild = [int]$cv.CurrentBuild } catch { }
         Log ((T 'Windows: {0} {1} (build {2}.{3}), 64-bit OS: {4}' `
                 'Windows: {0} {1} (сборка {2}.{3}), 64-bit ОС: {4}') -f `
-            $cv.ProductName, $cv.DisplayVersion, $cv.CurrentBuild, $cv.UBR, [Environment]::Is64BitOperatingSystem)
+            $productName, $cv.DisplayVersion, $cv.CurrentBuild, $cv.UBR, [Environment]::Is64BitOperatingSystem)
     } catch {
         Log ((T 'Windows: could not read the version ({0})' `
                 'Windows: не удалось прочитать версию ({0})') -f $_.Exception.Message)

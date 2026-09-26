@@ -101,7 +101,8 @@ structure of the Word window, which Microsoft may change one day.
 
 If the bar does not appear, flickers, or overlaps the document:
 
-1. Run **`Classic-mode.cmd`** from the installation folder.
+1. Run **`Classic-mode.cmd`** from the program folder (the same folder you ran
+   `Install.cmd` from).
 2. Restart Word.
 
 The bar moves into a separate Word strip with a grey service title above it
@@ -110,6 +111,28 @@ working. To go back: **`In-window-tabs.cmd`** and restart Word.
 
 If you had to do this, please send a `Diagnostics.cmd` report — it shows what
 did not work.
+
+## Word saves the document every time I switch tabs
+
+This is Word's own **AutoSave**, not the tab bar. For documents stored in
+OneDrive or SharePoint, when the **AutoSave** switch in the top-left corner of
+the Word window is on, Word saves your changes the moment you leave that
+document's window — by clicking a tab, by Alt+Tab, or by clicking another window.
+That is why the unsaved-changes dot disappears, and why the switch can take a
+moment (about a quarter of a second in our tests): the next window comes forward
+only after Word has saved. Word does exactly the same with the add-in turned
+off; the add-in never saves your documents and never changes how they are saved.
+
+If you do not want this:
+
+- **For one document:** turn the **AutoSave** switch off in that document's
+  window. Word remembers the choice for that file.
+- **For all files:** File → Options → Save → clear "AutoSave files stored in the
+  Cloud by default on Word" (the wording may differ slightly between Word
+  versions).
+
+Then save with Ctrl+S when you want to. Word's crash protection (AutoRecover)
+keeps working either way and never overwrites your file.
 
 ## What you should know (honest limitations)
 
@@ -122,12 +145,16 @@ did not work.
   mode the bar is taller — around 1.5 cm: Word adds its own service title above
   it, and that cannot be removed.
 - For documents in Protected View (files from the internet) there is no bar
-  inside the yellow window — the tab appears once you press "Enable Editing".
+  inside the yellow window itself; in your other Word windows such a document
+  shows as a grey tab, and it becomes an ordinary tab once you press
+  "Enable Editing".
 
 ## Technical details (you can skip this)
 
 The program is installed for the current user only:
-- files: `%LOCALAPPDATA%\TabsForWord`
+- files: `%LOCALAPPDATA%\TabsForWord` (the add-in itself and its settings;
+  `Classic-mode.cmd`, `Repair.cmd` and the other .cmd files stay in the folder
+  you installed from)
 - registry: `HKCU\Software\Classes` (the COM class) and
   `HKCU\Software\Microsoft\Office\Word\Addins\TabsForWord.Connect`
 - log: `%LOCALAPPDATA%\TabsForWord\Logs`

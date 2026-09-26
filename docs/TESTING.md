@@ -8,7 +8,14 @@ the intuition of "what should I run" with a fixed matrix.
 `powershell -ExecutionPolicy Bypass -File scripts\test.ps1` - seconds.
 Pure logic: the tab model, parsing of the settings files (colours, size,
 native-host.cfg, language), layout geometry (ComputePanelRect, DPI), the window
-locator, construction and painting of the control, live SetParent hosting.
+locator, construction and painting of the control, live SetParent hosting,
+and (since v1.7.3) the input rules of a tab switch: the WM_MOUSEACTIVATE
+decision (middle button included), a press on a tab keeps the document's focus
+while empty space gives it to the strip, a jittery drag is a click, a lost
+button-up, a real drag reorders, a snapped-back drag is not a click, a middle
+click closes only the tab it was pressed on, the activation retry rule, "input
+since the click" across the tick wrap, and that the log description of a window
+never reads its title. 68 tests as of v1.7.3 (58 in v1.7.2).
 Run after EVERY build, no exceptions.
 
 ## Level 2: end-to-end on a real Word (tests/manual/)
@@ -34,11 +41,19 @@ the person using the machine found it rather than the tests.
 | e2e-dpi-monitors.ps1 | moving the window between monitors with different scales | ~1.5 min |
 | e2e-side-panes.ps1 | Word side panes are not covered | ~1 min |
 | e2e-overflow-scroll.ps1 | scrolling with 24 tabs: clipping, the arrows, the touchpad | ~1.5 min |
-| e2e-reserve-mode.ps1 | reserve: the document area is pushed down, resize, the ribbon | ~2 min |
+| e2e-reserve-mode.ps1 | reserve: the document area is pushed down, resize, the ribbon; anchor fits are logged, no fight loop, no oscillation suspension | ~2 min |
 | e2e-overlay-interaction.ps1 | basic clicks, the ribbon, Ctrl+Tab (overlay) | ~2 min |
 | e2e-overlay-buttons-pv.ps1 | the buttons plus Protected View | ~2 min |
 | e2e-settings-pins-order.ps1 | pinning, stored order, the settings window | ~3 min |
 | probe-side-panes.ps1 | (not a test) a probe of the Word window tree | - |
+
+A check that can never fail is worse than no check. Until v1.7.3
+e2e-reserve-mode.ps1 counted the log line "Reserve: anchor shifted", which the
+product no longer wrote (it writes "Reserve: anchor moved"), so its "no fight
+loop" step always passed. It now counts "Reserve: anchor moved", FAILS if not a
+single one is logged ("anchor fits are logged"), and also fails on a "Reserve
+mode suspended" line. When a script greps the log, make sure the step fails if
+the line it counts does not exist.
 
 ## The matrix: what to run for which change
 

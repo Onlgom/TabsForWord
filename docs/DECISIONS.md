@@ -51,6 +51,10 @@ gives no control over desktop Word's windows (and the brief forbids it);
 
 ## ADR-003. The UI host: a Custom Task Pane (top-docked) + a WinForms UserControl
 
+**Status:** superseded by ADR-015 (v1.6.0): the main host is now our own window
+inside the Word window; the Custom Task Pane remains the fallback and the
+classic mode.
+
 **Decision:** the tab strip is a WinForms UserControl registered as a COM class
 and hosted through ICTPFactory.CreateCTP with msoCTPDockPositionTop; one CTP per
 Word window (keyed by Window.Hwnd), DockPositionRestrict=NoChange.
@@ -124,6 +128,10 @@ office.dll on NuGet.
 ---
 
 ## ADR-006. Installation: a PowerShell script, HKCU, a 64-bit import
+
+**Status:** extended by ADR-009 - the CLSID keys are now written into BOTH
+registry views (the 64-bit one and WOW6432Node), so that 32-bit Word finds the
+add-in too.
 
 **Decision:** Install/Uninstall/Repair are PowerShell scripts (plus .cmd wrappers
 with ExecutionPolicy Bypass): the DLL goes to %LOCALAPPDATA%\TabsForWord, is
@@ -582,8 +590,10 @@ to read the settings.
 
 **Why now (verifiable facts, not feelings):**
 1. **The field.** The package with the native mode enabled ran on TWO other
-   people's machines (machines A and B, Win10 Pro 25H2, Word ProPlus2024 x64,
-   150 %): both installations succeeded, the strip worked, and Word never crashed.
+   people's machines (machines A and B, Windows 11 Pro 25H2, build 26200 - their
+   reports said "Windows 10 Pro 25H2", the registry ProductName that Windows 11
+   still carries; Word ProPlus2024 x64 16.0.17932, 150 %): both installations
+   succeeded, the strip worked, and Word never crashed.
    The single genuine defect (a locator race against a half-built window) was found
    from the logs and fixed in v1.5.1.
 2. **Multi-DPI is closed.** A run on three monitors at once (100/125/150 %),
@@ -733,8 +743,11 @@ bookkeeping around it:
    never moved (it only counts syncs where EVERY window failed) - but with a
    single Word window open, five polls inside the File menu would have dropped the
    add-in into the CTP fallback, turning the strip into the classic task pane in
-   the middle of normal work. Nobody had hit it yet; it was found by reading the
-   log, not from a complaint.
+   the middle of normal work. Nobody had hit it yet in the field; it was found by
+   reading the log, not from a complaint. It was then reproduced in the lab: the
+   1.7.0 build with one document and the File menu open logged "Native host
+   failed; falling back to CustomTaskPane ... 5 syncs in a row" after about 4 s
+   (check C1 in TEST_RESULTS, stage 34).
 
 **Decision:** "the document area was not found" stops being one answer and becomes
 two. `WordNativeWindowLocator.IsFullPageUiActive` recognises the state by the
@@ -769,3 +782,157 @@ at all, but builds 1.6.0-1.7.0 are already in people's hands and their reports
 have to read correctly too.
 
 **Date:** 2026-07-28
+
+---
+
+## ADR-018. A press on a tab does not activate its window; the switch is posted, verified and retried once (stage 37, v1.7.3)
+
+**Context:** the user reported that now and then a tab click does not switch the
+window (the tab is pressed, the window stays), and wondered whether it had to do
+with some windows being maximised and some not. Their own add-in log of
+2026-09-17 showed the same tab requested three times within 7 seconds, and the
+same pattern twice more; each time the document area of the PREVIOUS window was
+re-laid out about 1.3-2 s after the click ("Reserve: anchor moved"). The log
+could not say whether a switch had stuck: the line "Window activated" was
+written unconditionally. The Windows Application log of that day also shows a
+Word hang (AppHang, about 40 s) and GPU driver timeouts (LiveKernelEvent 141) -
+system-level problems the add-in does not cause, but they can make a switch look
+as if it did not happen.
+
+Reproduction on real Word with v1.7.2 (script-driven real mouse clicks, 4
+temporary documents, mixed maximised and ordinary windows): clicks on the strip
+of the window in front - 40/40 correct, and 30/30 with Word's full-screen mode;
+clicks on the strip of a visible but NOT active ordinary window, 28 px inside a
+tab - 30/30; 6 px inside the tab's left edge - **3/30 wrong**, the window whose
+strip was clicked came to the front instead of the requested one. The cause,
+confirmed by the reproduction and the code: the press itself activated the
+background window (WM_MOUSEACTIVATE went up to OpusApp, and
+`UserControl.OnMouseDown` called SetFocus on the strip, which activates an
+inactive top-level window too). Word's WindowActivate -> Reconcile made that
+window's tab the active one - which is wider (semibold text, an always-visible
+close box) - so the tabs shifted under the cursor before the click was resolved,
+and the click hit the neighbouring tab or empty space. With every window
+maximised only the strip of the window in front is visible, which is why the
+problem followed "windowed vs full screen".
+
+**Decision (TabStripControl, DocumentWindowManager, the new WindowActivator.cs):**
+1. In the in-window mode a left or middle press on a tab body answers
+   WM_MOUSEACTIVATE with MA_NOACTIVATE (WM_POINTERACTIVATE with PA_NOACTIVATE for
+   touch and pen) and does not call `base.OnMouseDown`, so the press neither
+   activates the strip's window nor takes the keyboard focus. The close box, the
+   buttons, empty space and the right button keep the ordinary activation (the
+   context menu needs its window in front); a press on empty space or a scroll
+   arrow of the window in front still focuses the strip, so the keyboard route
+   stays. The classic CTP mode keeps the old press behaviour.
+2. The hit of a press is taken at WM_MOUSEACTIVATE time, on the layout the user
+   was looking at. A middle click closes only a tab that was both pressed and
+   released on; the context menu is for the pressed tab.
+3. The switch is posted (`BeginInvoke` on a hidden control created on Word's UI
+   thread) and runs once the click is completely over; requests that arrive
+   before it runs collapse into the latest, Ctrl+Tab goes the same way, and the
+   second press of a double click is not a second switch.
+4. The switch itself (`DocumentWindowManager.ActivateWindow`): a minimised window
+   is restored with WM_SYSCOMMAND/SC_RESTORE (it comes back maximised if it was
+   maximised - the old COM `WindowState = Normal` did not), then COM
+   `Window.Activate`, then SetForegroundWindow + BringWindowToTop, and the result
+   is logged: `Window activated: hwnd=N (tab, sfw=1, in front, from 0x.. OpusApp
+   normal to 0x.. OpusApp max, 31 ms)` - hwnd, class and state, never a title.
+5. `ActivationWatch` looks again at +250 ms and +1200 ms. If the target (or a
+   dialog it owns) is not in front, a WARN `Activate check: target ... is not in
+   front ...` names the window that is. The target is re-raised ONCE, and only
+   when the foreground went back to the very Word window the switch started from
+   and there has been no keyboard or mouse input since the click
+   (GetLastInputInfo) - a deliberate click back, Alt+Tab or the taskbar is never
+   fought. Diagnostics 1.6 treats this warning as a user-visible problem.
+
+**Result on real Word (final build):** background-strip clicks 6 px from the left
+edge - **0/40 wrong**; clicks on the strip in front with mixed window states -
+0/30 wrong; the add-in log of those 70 switches has no "Activate check" warning
+and no ERROR. An intermediate build had 1 miss in 22, traced to the test harness
+itself; another intermediate run was 0/40.
+
+**Alternatives considered:**
+- *Hit-testing against the layout that was painted* (keeping the previous layout
+  and resolving a press against it). Not needed once the press no longer
+  activates the window and so no longer re-lays out the tabs; the hit taken at
+  WM_MOUSEACTIVATE covers what is left (the right button, which still activates).
+- *Unlimited retries, AttachThreadInput, synthetic Alt key presses* to get
+  around the foreground lock. They fight the user and the system's foreground
+  rules; one retry under strict conditions is enough to recover a switch that
+  Word undid, without ever stealing the foreground from something the user chose.
+- *Retrying on any foreground change,* not only a return to the source window.
+  It fights automation and other programs that legitimately bring a window
+  forward - observed with the test harness: when the harness itself brought
+  other Word windows forward, an intermediate build's retry pulled the target back.
+
+**Open:** whether Word itself ever undoes a switch (the 2026-09-17 pattern) is not
+proven. If it does, v1.7.3 logs it ("Activate check") and recovers once; field
+logs of 1.7.3 will tell.
+
+**Date:** 2026-09-26
+
+---
+
+## ADR-019. The ruler comes back on a timer, not on the poll (stage 37, v1.7.3)
+
+**Context:** the user asked to halve the time the ruler takes to reappear after
+the window is moved. The latency chain: in reserve mode, whenever Word re-lays out
+its window after a SIZE change it puts its document container (`_WwF`) back at
+its natural top, so the strip covers the ruler until the add-in moves the anchor
+again. The add-in moved it only after `SizeSettleMs` (125 ms) of quiet - and then
+only when something woke it: the next WinEvent or the ~1 Hz poll. After a snap
+or a maximise nothing else happens, so the ruler waited for the poll, up to about
+1.1 s. A plain move with no size change never covers the ruler.
+
+Measured on real Word with a real mouse drag of the title bar, sampling the
+geometry every ~17 ms (n = repetitions):
+
+| Gesture | v1.7.2 | v1.7.3 |
+|---|---|---|
+| Move an ordinary window (no size change) | ruler never covered | ruler never covered |
+| Drag a MAXIMISED window by its caption (it restores mid-drag) | covered ~150 ms at the restore, back before release | the same |
+| Drag to the top edge and release (Aero Snap maximise) | anchor fixed 219-844 ms after release, median **751 ms** (n=6) | median **207 ms** (n=8, development build), **237 ms** (n=6, final build); ruler visibly painted: median 269 ms |
+| Drag to the left edge (snap to the left half) | not measured | anchor median 221 ms, ruler visibly painted 284 ms (n=8) |
+
+**Decision (NativeTabHost.cs):**
+- A one-shot WinForms timer per host is armed for the rest of the quiet period
+  (plus one 16 ms timer granule) and fires exactly when it ends - no more waiting
+  for the poll.
+- No fits during a drag: when the timer fires while the user still drags
+  (GUI_INMOVESIZE on Word's thread, or a mouse button held - the latter covers
+  drags Word's thread does not run, such as a snap group divider dragged from
+  the neighbouring window), it does not move the anchor and looks again every
+  50 ms. A live resize therefore does not make the page jump by the strip height
+  on every pause of the hand; the WinEvents of the movement do what they always
+  did.
+- A re-entrancy guard: our SetWindowPos on the anchor can make Word's WM_SIZE
+  handler pump messages, and a nested `UpdateLayout` would move the anchor a
+  second time before the outer pass recorded it. The nested call re-arms the
+  timer instead.
+- Every fit that answers a resize is logged with its delay -
+  `Reserve: anchor moved by Npx (word=0x...), N ms after the resize began` - so a
+  field log shows how long the ruler was covered. In the final run these values
+  were 125-250 ms (median about 156).
+- `SizeSettleMs` stays 125 ms. Word's own follow-up layout pass was observed about
+  80 ms after a size change; a shorter quiet time would move the anchor before
+  that pass and cause a second fit - a visible flicker.
+
+The result is more than three times faster than before, against the requested
+two.
+
+**Alternatives considered:**
+- *A 40 ms quiet time.* It lands before Word's follow-up layout pass (~80 ms) and
+  causes the double fit described above; the dominant part of the delay was the
+  wait for the poll, which the timer removes anyway.
+- *An EVENT_SYSTEM_MOVESIZEEND hook.* It marks only the end of a modal move/size
+  loop: a maximise by double click or by keyboard, a snap group divider dragged
+  from another window or a window-management tool produce no such event, so the
+  quiet-time timer would still be needed, and the event does not say when Word
+  has finished its own re-layout.
+
+**Found on the way (a code review of the change):** the tick fields of the host
+started at 0 and broke every interval check while `Environment.TickCount` is
+negative (24.9-49.7 days of uptime); fixed - see KNOWN_ISSUES "Problems that were
+fixed", item 4.
+
+**Date:** 2026-09-26

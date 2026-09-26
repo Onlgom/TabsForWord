@@ -16,8 +16,8 @@ the ribbon, with no Custom Task Pane title strip above it (decision
 [ADR-015](docs/DECISIONS.md); how it works:
 [docs/NATIVE_TAB_HOST.md](docs/NATIVE_TAB_HOST.md)). The classic Custom Task
 Pane mode is kept as a fallback: it can be switched on with `Classic-mode.cmd`
-from the installation folder, and it switches itself on if the in-window host
-ever fails.
+from the unpacked package folder (next to `Install.cmd`), and it switches itself
+on if the in-window host ever fails.
 
 Since version 1.7.0 the interface follows **Word's own UI language** — Russian
 Word gets Russian tabs, everything else gets English — and the language can be

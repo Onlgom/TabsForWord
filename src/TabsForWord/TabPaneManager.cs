@@ -246,7 +246,7 @@ namespace TabsForWord
 
         private void OnTabActivateRequested(int hwnd)
         {
-            if (_manager != null) _manager.ActivateWindow(hwnd);
+            if (_manager != null) _manager.RequestActivate(hwnd, "tab");
         }
 
         private void OnTabCloseRequested(int hwnd)

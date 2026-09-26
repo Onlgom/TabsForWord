@@ -81,6 +81,7 @@ namespace TabsForWord.NativeHost
 
         internal const uint GA_PARENT = 1;
         internal const uint GA_ROOT = 2;
+        internal const uint GA_ROOTOWNER = 3;   // the root, then up the owner chain (a dialog -> its Word window)
 
         [DllImport("user32.dll")]
         internal static extern IntPtr GetAncestor(IntPtr hWnd, uint gaFlags);
@@ -96,6 +97,14 @@ namespace TabsForWord.NativeHost
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool IsIconic(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool IsZoomed(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool IsWindowEnabled(IntPtr hWnd);
 
         // ------------------------------------------------------------------
         // Window management
@@ -138,6 +147,152 @@ namespace TabsForWord.NativeHost
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool IsChild(IntPtr hWndParent, IntPtr hWnd);
+
+        // ------------------------------------------------------------------
+        // Activation (tab switching) and input state
+        // ------------------------------------------------------------------
+
+        internal const int WM_SYSCOMMAND = 0x0112;
+        internal const int SC_RESTORE = 0xF120;
+
+        [DllImport("user32.dll", EntryPoint = "SendMessageW")]
+        internal static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        /// <summary>Screen position of the cursor for the message being processed (packed x/y).</summary>
+        [DllImport("user32.dll")]
+        internal static extern uint GetMessagePos();
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINTER_INFO
+        {
+            public uint pointerType;
+            public uint pointerId;
+            public uint frameId;
+            public uint pointerFlags;
+            public IntPtr sourceDevice;
+            public IntPtr hwndTarget;
+            public POINT ptPixelLocation;
+            public POINT ptHimetricLocation;
+            public POINT ptPixelLocationRaw;
+            public POINT ptHimetricLocationRaw;
+            public uint dwTime;
+            public uint historyCount;
+            public int InputData;
+            public uint dwKeyStates;
+            public ulong PerformanceCount;
+            public int ButtonChangeType;
+        }
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetPointerInfo(uint pointerId, ref POINTER_INFO pointerInfo);
+
+        /// <summary>Screen position of a touch/pen pointer (WM_POINTERACTIVATE); false if unavailable.</summary>
+        internal static bool TryGetPointerPixelLocation(uint pointerId, out System.Drawing.Point point)
+        {
+            point = System.Drawing.Point.Empty;
+            try
+            {
+                var info = new POINTER_INFO();
+                if (!GetPointerInfo(pointerId, ref info)) return false;
+                point = new System.Drawing.Point(info.ptPixelLocation.X, info.ptPixelLocation.Y);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LASTINPUTINFO
+        {
+            public uint cbSize;
+            public uint dwTime;
+        }
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+
+        /// <summary>
+        /// Environment.TickCount-compatible time of the last keyboard or mouse input in
+        /// the session (any process); null if the call fails.
+        /// </summary>
+        internal static int? GetLastInputTickSafe()
+        {
+            try
+            {
+                var lii = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf(typeof(LASTINPUTINFO)) };
+                if (!GetLastInputInfo(ref lii)) return null;
+                return unchecked((int)lii.dwTime);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct GUITHREADINFO
+        {
+            public uint cbSize;
+            public uint flags;
+            public IntPtr hwndActive;
+            public IntPtr hwndFocus;
+            public IntPtr hwndCapture;
+            public IntPtr hwndMenuOwner;
+            public IntPtr hwndMoveSize;
+            public IntPtr hwndCaret;
+            public RECT rcCaret;
+        }
+
+        private const uint GUI_INMOVESIZE = 0x00000002;
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO lpgui);
+
+        [DllImport("kernel32.dll")]
+        internal static extern uint GetCurrentThreadId();
+
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
+
+        /// <summary>
+        /// Is the left or right mouse button physically held right now (any window, any
+        /// process)? Both are checked, so swapped buttons do not matter.
+        /// </summary>
+        internal static bool IsMouseButtonDownSafe()
+        {
+            try
+            {
+                return ((GetAsyncKeyState(0x01) | GetAsyncKeyState(0x02)) & 0x8000) != 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Is the calling thread (Word UI thread) inside the modal move/size loop right
+        /// now - the user is dragging a window or its frame with the mouse? Stateless:
+        /// asked at the moment, so nothing can get stuck if an end event is missed.
+        /// </summary>
+        internal static bool IsInMoveSizeLoopSafe()
+        {
+            try
+            {
+                var gti = new GUITHREADINFO { cbSize = (uint)Marshal.SizeOf(typeof(GUITHREADINFO)) };
+                if (!GetGUIThreadInfo(GetCurrentThreadId(), ref gti)) return false;
+                return (gti.flags & GUI_INMOVESIZE) != 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
 
         // ------------------------------------------------------------------
         // Window styles (x64-safe wrappers)

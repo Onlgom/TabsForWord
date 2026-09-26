@@ -102,8 +102,10 @@ Ready-made switches (double-click, then restart Word):
 
 ## 6. How to get the CustomTaskPane back
 
-Run "Classic-mode.cmd" from the installation folder (or write `mode=ctp` into
-native-host.cfg) and restart Word. Deleting the config now means the MAIN mode
+Run "Classic-mode.cmd" from the unpacked package folder, the one Install.cmd was
+run from (or write `mode=ctp` into native-host.cfg), and restart Word. The
+switches are not copied into `%LOCALAPPDATA%\TabsForWord` - that folder holds
+only the DLL, the logs and the cfg files. Deleting the config now means the MAIN mode
 (native), not CTP.
 
 The classic mode also switches itself on in two cases, with no user involved:
@@ -116,7 +118,11 @@ Both cases get their own item in the automatic summary of the diagnostics report
 ## 7. The Word version everything was verified on
 
 Microsoft 365 Word x64 (Windows 11 Pro 26200, Russian ribbon), July 2026.
-Every observation below comes from that particular build.
+Every observation below comes from that particular build. The v1.7.3
+measurements (the click activation and the settle timer in section 9, ADR-018
+and ADR-019) were made on the same machine in September 2026 with Word
+16.0.20326, one 1920x1080 monitor at 100 % and the tab size multiplier 1.3
+(a 48 px strip).
 
 ## 8. The Word HWND hierarchy that was discovered (from the WindowTree dumps)
 
@@ -169,8 +175,9 @@ had to be split into a failure and a normal state - see ADR-017 and section 11.
 4. If `_WwG` is not found (the class gets renamed in some future Office), the
    fallback is the topmost visible window below the client top that is at least
    40% as wide and at least 100 px tall.
-5. Every choice is logged with its reason; after 3 failures in a row a window
-   tree dump is written (the threshold was later raised to 6, see section 11).
+5. Every choice is logged with its reason; after 6 failures in a row a window
+   tree dump is written (the threshold was 3 at first; it was raised to 6 in
+   v1.5.1, stage 23, together with the locator race fix).
 6. "Nothing found" is two different answers. If a full-page UI window covers the
    client area (the File menu), it is a normal state: one INFO line, no failure
    counted, no dump, and the manager is told the sync succeeded - otherwise five
@@ -214,14 +221,39 @@ lip, and the anti-aliased edge of the fill lightened the line under the tab.
 
 Live resize with the mouse: while the window size is changing the anchor is not
 adjusted at all (the strip keeps following the window) - one adjustment after
-about 250 ms of quiet (later reduced to 125 ms). That removes the ruler jitter
+`SizeSettleMs` = 125 ms of quiet (250 ms at first). That removes the ruler jitter
 while the frame is dragged on slower machines and stops the oscillation guard
-from firing on legitimate layout storms.
+from firing on legitimate layout storms. Since v1.7.3 (ADR-019):
+- a one-shot timer per host fires exactly when the quiet time ends. Before, the
+  adjustment waited for the next WinEvent or the ~1 Hz poll, and after a snap or
+  a maximise nothing else arrives - the ruler stayed under the strip for up to
+  about a second (median 751 ms after an Aero Snap maximise; now about 210-240 ms);
+- while the user still drags (GUI_INMOVESIZE on Word's thread, or a mouse button
+  held) the timer does not move the anchor and looks again every 50 ms, so the
+  page does not jump on every pause of the hand;
+- a re-entrancy guard: if Word's WM_SIZE handler pumps messages during our
+  SetWindowPos on the anchor, a nested `UpdateLayout` does not move the anchor a
+  second time - it re-arms the timer instead;
+- 125 ms is kept on purpose: Word's own follow-up layout pass comes about 80 ms
+  after a size change, and a shorter quiet time would fit before it and then fit
+  again (a visible flicker);
+- every adjustment that answers a resize is logged with its delay:
+  `Reserve: anchor moved by Npx (word=0x...), N ms after the resize began`
+  (other adjustments are logged at most every 500 ms, without the delay).
 
-Activation by click: besides Window.Activate() and SetForegroundWindow, we also
-call BringWindowToTop - SetForegroundWindow can fail silently during activation
-transitions (a mix of maximised and ordinary windows), because of which a
-document in an ordinary window sometimes did not come up above a maximised one.
+Activation by click (since v1.7.3, ADR-018): a left or middle press on a tab
+answers WM_MOUSEACTIVATE with "no activate" and does not take the keyboard focus,
+so a press in a background window no longer activates that window and re-lays out
+the tabs under the cursor. The switch is posted to run after the click is over:
+a minimised target is restored with SC_RESTORE (it stays maximised if it was),
+then Window.Activate(), SetForegroundWindow and BringWindowToTop (SetForegroundWindow
+can fail silently during activation transitions - a mix of maximised and ordinary
+windows - and BringWindowToTop additionally raises the window in the z-order).
+The result is logged ("Window activated: hwnd=N (tab, sfw=1, in front, ...)"),
+and a check at +250 ms and +1200 ms warns ("Activate check: target ... is not in
+front") and re-raises the target once if the switch was undone with no user
+input since the click. The focus then goes back to the document of the activated
+window.
 
 The tab context menu is a classic Win32 menu (TrackPopupMenu), not a
 ContextMenuStrip. The reason (a Word crash found in field testing): the
@@ -300,7 +332,7 @@ Additionally verified after the 2026-07-24 refinements (from the user's field no
    theme the background will be matched dark while the tabs stay light (the
    specification 2b palette) - a dark palette is out of scope here.
 3. When a window closes, a single "extra" shift of the dying `_WwF` is possible
-   (a "Reserve: anchor shifted" line before the destroy) - harmless, the window
+   (a "Reserve: anchor moved" line before the destroy) - harmless, the window
    disappears anyway.
 4. The strip is added to document windows only; there is none in a Protected View
    window (the same as the CTP limitation, O3).
@@ -323,8 +355,10 @@ Additionally verified after the 2026-07-24 refinements (from the user's field no
 
 - The class names `_WwG`/`_WwF`/`_WwB` have been stable for decades but are not
   documented. If they change, the fallback heuristic (section 9, item 4) takes
-  over; on a complete failure the strip simply hides, and both the add-in and
-  Word keep working. CTP can be brought back with a single switch.
+  over; on a complete failure the strip hides first, and both the add-in and
+  Word keep working. If the failure persists for 5 synchronisations in a row,
+  the add-in falls back to CTP automatically within the session (the emergency
+  contour below); Classic-mode.cmd makes CTP the permanent choice.
 - The internal layout (the ribbon height and so on) is read dynamically - the
   dependency is on geometry, not on constants.
 - The emergency contour: 5 failed synchronisations of the in-window mode in a row
@@ -355,8 +389,9 @@ docs/KNOWN_ISSUES.md.
 
 ## 14. Rollback: how to get the pre-1.6.0 behaviour back
 
-1. A user-level rollback (no rebuild): "Classic-mode.cmd" from the installation
-   folder - the strip returns to a Custom Task Pane with its title strip.
+1. A user-level rollback (no rebuild): "Classic-mode.cmd" from the unpacked
+   package folder (where Install.cmd is) - the strip returns to a Custom Task
+   Pane with its title strip.
    Back again: "In-window-tabs.cmd".
 2. A full code rollback: the in-window host lives in `src/TabsForWord/NativeHost/`
    and is wired in at exactly one place - the mode choice in

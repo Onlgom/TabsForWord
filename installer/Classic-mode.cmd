@@ -12,6 +12,6 @@ echo [OK] Vklyuchen KLASSICHESKIY rezhim (mode=ctp).
 echo Perezapustite Microsoft Word.
 echo.
 echo Vernut obychnyy vid (vkladki vnutri okna Word):
-echo   fayl "Vkladki v okne Word.cmd" iz etoy zhe papki.
+echo   fayl "In-window-tabs.cmd" iz etoy zhe papki.
 echo.
 pause

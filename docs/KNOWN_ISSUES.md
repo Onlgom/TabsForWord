@@ -24,6 +24,53 @@ is worth more than a surprise later.
 - **Status:** RESOLVED (2026-07-23). A one-shot height correction on the first
   SizeChanged carrying a real size. Result: a 67 px pane with 29 px of content.
 
+### 3. A click on a tab in a background window sometimes switched to the wrong window
+- **Symptom:** a tab was "pressed" but the window did not change. A field log
+  (2026-09-17) shows the same tab requested three times in 7 seconds. Reproduced
+  on v1.7.2 with real mouse clicks: on the strip of a visible but NOT active
+  ordinary window, 6 px inside a tab's left edge, **3 clicks in 30 missed** - the
+  window whose strip was clicked came to the front instead of the requested one
+  (28 px inside the tab: 0/30; on the strip of the window in front: 0/40, and
+  0/30 with Word's full-screen mode). It only exists with non-maximised windows:
+  with every window maximised only the strip of the window in front is visible -
+  hence the user's impression that it had to do with "windowed vs full screen".
+- **Cause:** the press itself activated the background window
+  (WM_MOUSEACTIVATE went up to OpusApp, and `UserControl.OnMouseDown` put the
+  keyboard focus on the strip, which also activates an inactive top-level window).
+  Word's WindowActivate -> Reconcile made that window's own tab the active one,
+  which is wider (semibold text, an always-visible close box), so the tabs shifted
+  under the cursor BEFORE the click was resolved and it landed on a neighbouring
+  tab or on empty space. The same shift could make a middle click close the
+  NEIGHBOURING tab and a right click open the menu of the neighbour.
+- **Status:** RESOLVED (2026-09-26, v1.7.3). In the in-window mode a left or
+  middle press on a tab body answers WM_MOUSEACTIVATE (WM_POINTERACTIVATE for touch
+  and pen) with "no activate" and does not take the keyboard focus; the hit of a
+  press is taken on the layout the user saw; the switch is posted to run after the
+  click is over, logged with its result and checked afterwards (ADR-018). Result
+  on real Word: **0 misses in 40** clicks 6 px from the edge of a background strip,
+  0/30 on the strip in front with mixed window states, and no "Activate check"
+  warning in the log. Fixed together: a minimised window is restored with
+  SC_RESTORE, so a window that was maximised comes back maximised (the old COM
+  `WindowState = Normal` turned it into an ordinary one, creating the very mix of
+  maximised and ordinary windows); a double click is one switch, not two; a "drag"
+  released within three drag thresholds of the press counts as a click; a lost
+  button-up no longer turns plain hovering into a phantom drag that swallows the
+  next click; a middle click closes only a tab that was both pressed and released
+  on; the context menu is for the pressed tab.
+
+### 4. After about 25 days of uptime the reserve could give up for the session
+- **Symptom:** none reported; found by a code review in stage 37. The possible
+  effect: the ruler permanently under the strip until Word restarts.
+- **Cause:** `Environment.TickCount` is negative for half of every 49.7 days of
+  uptime (from 24.9 to 49.7 days). Tick fields that started at 0 then broke the
+  interval checks of the in-window host: (a) the quiet-period check - the reserve
+  never fitted until the first resize; (b) the oscillation window of the reserve
+  guard never reset, so ordinary fits added up over hours until the guard
+  suspended the reservation for 30 s and, after three times, gave it up for the
+  session; (c) the background colour sampling never ran.
+- **Status:** RESOLVED (2026-09-26, v1.7.3). Every tick field starts "long ago",
+  and the quiet period has its own flag instead of being judged by the tick alone.
+
 ## Known limitations (architectural, documented honestly)
 
 ### O1. Tabs do NOT merge the windows physically
@@ -83,6 +130,10 @@ Since stage 22 the interception can be switched off in the settings window
 instantly, is stored in hotkey.cfg and survives a restart. It is on by default
 (the MVP behaviour is unchanged). No other shortcuts are affected, and the hook
 is removed when the add-in unloads.
+Since v1.7.3 the interception is active only while an enabled Word document
+window of this Word process is in front. Inside Word's own dialogs that have
+tabs of their own (Font, Paragraph) Ctrl+Tab reaches the dialog as usual;
+before, the hook took it there too.
 
 ### O9. Tab order after drag-and-drop used to live only in the session (lifted, stage 22)
 The order lives in the add-in model (the same in every window and in the all-tabs
@@ -117,6 +168,12 @@ The arrows / Home / End move the focus frame by index: in scrolling mode the
 frame can end up outside the visible zone, and after tabs are dragged the index
 is not recomputed by hwnd. The mouse and the all-tabs menu are unaffected.
 Accessibility polish is out of scope for the MVP (external audit 2, item 13).
+How the strip gets the keyboard focus (in-window mode, since v1.7.3): a press on
+a tab no longer takes the focus - after a switch the focus goes back to the
+document of the activated window. The strip takes the focus from a press on its
+empty space or on a scroll arrow while its window is in front, so the keyboard
+route (arrows, Home/End, Enter) stays reachable. The classic CTP mode keeps the
+old behaviour (any press focuses the strip).
 
 ### O14. Soft tab text on monitors scaled differently from the system scale
 On a monitor whose scale differs from the SYSTEM one (the scale the primary
@@ -145,15 +202,27 @@ separate ARM64 branch or 4.8.1 check. Bottom line: never tested on any ARM
 device and not officially supported. To be checked when a real ARM64 device
 becomes available.
 
-### O16. Windows 10 - claimed by construction, not tested
-Every PASS in the test results was produced on Windows 11 (build 26200).
-Windows 10 is considered compatible by construction: .NET 4.8 is part of
-Windows 10 from version 1903 and the APIs used (per-monitor DPI and the rest)
-exist there - but not a single run has happened on Windows 10. On older Windows
-10 builds (before 1903), or on a system without .NET 4.8, the COM component will
-not activate; since the installer update such a case stops the installation with
-an explicit error (see the .NET check in installer/install.ps1) instead of
-reporting a false success. To be checked on any available Windows 10 machine.
+### O16. Windows 10 and Word editions other than Microsoft 365 - field-confirmed in part, not lab-tested
+Every PASS of the test suite (unit tests and E2E) was produced on the development
+machine: Windows 11 (build 26200) with Microsoft 365 Word x64. What else is known
+comes from field reports (Diagnostics), not from test runs:
+- **Windows 10 22H2** (build 19045): field-confirmed on ONE machine (machine C,
+  2026-07-28, Microsoft 365 Word x64, 100 % scaling) - a clean install, zero ERROR
+  lines, the user confirmed it works, checks F1/F2 in TEST_RESULTS. The E2E suite
+  has never been run on Windows 10.
+- **Word ProPlus 2024 x64** (16.0.17932): field-confirmed on machines A and B
+  (Windows 11 25H2, build 26200, 150 %). Their reports said "Windows 10 Pro 25H2":
+  that was the registry ProductName, which on Windows 11 still reads "Windows 10";
+  build 26200 is Windows 11 (the installer and Diagnostics 1.6 now label builds
+  from 22000 on as Windows 11).
+- **Word 2016, 2019 and 2021, and 32-bit Word**: NOT TESTED anywhere. They are
+  claimed by construction only (the add-in is built against the Word 15.0
+  interop, ADR-005, and the CLSID is registered in both registry views for
+  32-bit Word, ADR-009).
+On Windows 10 builds before 1903, or on a system without .NET 4.8, the COM
+component will not activate; since the installer update such a case stops the
+installation with an explicit error (see the .NET check in
+installer/install.ps1) instead of reporting a false success.
 
 ### O17. The main mode relies on undocumented internals of the Word window
 The strip is embedded into the Word window through Win32: the anchor is found by
@@ -181,7 +250,7 @@ canvas with Direct2D, so the colour cannot be read from its DC). In Print Layout
 the match is exact (delta <= 3). In Web Layout and Draft the work area is white,
 so the strip keeps the specification colour. bg=#RRGGBB settles it by hand.
 
-### O20. The strip disappears while the File menu is open, and returns about a second later
+### O20. The strip disappears while the File menu is open, and returns about a second and a half later
 The File menu (Backstage) and the pages opened from it - Print, Save As, Account -
 replace the whole Word interface with a full-page screen and hide the document
 area completely. There is nothing to pin the strip to at that moment, so it hides
@@ -189,8 +258,37 @@ too; leaving it visible would mean a row of tabs floating over the File screen.
 On the way back Word rebuilds its layout, and the strip reappears within about a
 second and a half (measured in the field: 1.4 s). Nothing is lost - the tabs, their
 order, colours and pinning are all kept.
-The return depends on the add-in's ~1 Hz poll, and Word barely lets it tick while
-the full-page screen is up (measured: gaps of 27 and 51 seconds inside a single
-visit to the File menu). In practice this does not delay anything, because the
+The return depends on the add-in's ~1 Hz poll. On machine C Word barely let it
+tick while the full-page screen was up (gaps of 27 and 51 seconds inside a single
+visit to the File menu); on the development machine it kept ticking at 1 Hz
+(stage 34, TEST_RESULTS). Either way this does not delay anything, because the
 ticks resume at the moment the menu closes - which is exactly when the strip is
 needed again.
+
+### O21. AutoSave (OneDrive/SharePoint) saves a document the moment you leave its window
+For a document stored in OneDrive or SharePoint with Word's "AutoSave" toggle on
+(the switch in the Word title bar), Word saves the changes as soon as the
+document's window loses activation - synchronously, and whatever does the
+switching. What the user sees: the unsaved dot disappears when they switch away,
+and the next window comes forward only after that save, so the switch lags.
+This is Word's behaviour, not the add-in's: the add-in never calls Save/SaveAs
+and never cancels a save (DocumentBeforeSave only schedules a reconcile).
+Measured 2026-09-26 on two temporary OneDrive documents (type 3 characters, wait
+250 ms, switch, poll `Document.Saved`):
+
+| How the window was left | Saved after the switch |
+|---|---|
+| no switch (baseline) | 1 of 4 saved after 7.4 s; 3 of 4 not within 12 s |
+| a tab click (add-in v1.7.2) | 219-312 ms (4/4) |
+| Alt+Tab | 218-281 ms (4/4) |
+| Alt+Tab with the add-in DISCONNECTED | 218-234 ms (3/3) |
+| SetForegroundWindow / Word's own Window.Activate from outside | 0-15 ms / 125 ms (3/3 each) |
+
+The add-in does not and will not switch AutoSave off behind the user's back (it
+never changes how the user's documents are saved). What the user can do: turn
+the "AutoSave" toggle off for that document (Word remembers it per file), or for
+every file: File > Options > Save > untick "AutoSave files stored in the Cloud by
+default on Word" (the Russian wording varies between builds); then save with
+Ctrl+S. AutoRecover still protects against crashes - it is a different feature
+and never overwrites the document file. Details: docs/RESEARCH.md, "Word AutoSave
+and window switching".

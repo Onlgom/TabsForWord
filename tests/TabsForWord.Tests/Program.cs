@@ -75,6 +75,17 @@ namespace TabsForWord.Tests
             Run("Language: captions switch and are never empty", TestStringsSwitch);
             Run("Language: the strip and the menu build in English", TestTabStripEnglish);
 
+            Run("Activation: the retry rule", TestActivationRetryPolicy);
+            Run("Activation: input since the switch (wrapping ticks, unknown)", TestActivationInputSince);
+            Run("Activation: Describe never reads the window title", TestActivationDescribe);
+            Run("TabStripControl: a press on a tab does not activate the window", TestStripMouseActivation);
+            Run("TabStripControl: a press does not take the keyboard focus", TestStripPressKeepsFocus);
+            Run("TabStripControl: a drag that went nowhere is a click", TestStripJitterDragIsClick);
+            Run("TabStripControl: a lost button-up does not become a phantom drag", TestStripLostButtonUp);
+            Run("TabStripControl: a real drag reorders and does not activate", TestStripRealDragReorders);
+            Run("TabStripControl: a long drag snapped back by the pin rule is not a click", TestStripSnappedBackDragIsNotClick);
+            Run("TabStripControl: middle click closes only the tab pressed and released", TestStripMiddleClickSameTab);
+
             Console.WriteLine();
             Console.WriteLine("Total: PASS=" + _passed + ", FAIL=" + _failed);
             return _failed == 0 ? 0 : 1;
@@ -1536,6 +1547,297 @@ namespace TabsForWord.Tests
             thread.Start();
             thread.Join();
             if (failure != null) throw new Exception("TabListPopupPinnedAndSettings: " + failure.Message, failure);
+        }
+
+        // ------------------------------------------------------------------
+        // Tab switching: the post-activation check and the strip's mouse handling
+        // ------------------------------------------------------------------
+
+        private static void TestActivationRetryPolicy()
+        {
+            Assert(ActivationPolicy.ShouldRetry(true, false, false),
+                "our Word window took the foreground back, no input, first time -> retry");
+            Assert(!ActivationPolicy.ShouldRetry(false, false, false),
+                "another program or a dialog is in front -> never fight it");
+            Assert(!ActivationPolicy.ShouldRetry(true, true, false),
+                "the user did something after the click -> their choice wins");
+            Assert(!ActivationPolicy.ShouldRetry(true, false, true),
+                "at most one retry per switch");
+        }
+
+        private static void TestActivationInputSince()
+        {
+            Assert(ActivationPolicy.InputSince(null, 1000), "unknown input time counts as input (conservative)");
+            Assert(ActivationPolicy.InputSince(1005, 1000), "input after the switch");
+            Assert(!ActivationPolicy.InputSince(995, 1000), "input before the switch");
+            Assert(!ActivationPolicy.InputSince(1000, 1000), "the click itself (same tick) is not new input");
+            Assert(ActivationPolicy.InputSince(int.MinValue + 2, int.MaxValue - 2),
+                "the tick counter wraps around (49.7 days) - still 'after'");
+        }
+
+        private static void TestActivationDescribe()
+        {
+            Exception failure = null;
+            var thread = new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    Assert(WindowActivator.Describe(IntPtr.Zero) == "none", "no window -> none");
+                    IntPtr dead;
+                    using (var form = new System.Windows.Forms.Form { Text = "SECRET-DOC-NAME.docx" })
+                    {
+                        var h = form.Handle;
+                        string d = WindowActivator.Describe(h);
+                        Assert(d.IndexOf("SECRET", StringComparison.OrdinalIgnoreCase) < 0,
+                            "the title (a document name in Word) is never in the description: " + d);
+                        Assert(d.Contains("WindowsForms10"), "the class name is there: " + d);
+                        Assert(d.Contains("normal"), "the window state is there: " + d);
+                        Assert(!WindowActivator.IsOurWordFrame(h), "a WinForms form is not a Word window");
+                        dead = h;
+                    }
+                    Assert(WindowActivator.Describe(dead).EndsWith("dead"), "a destroyed window is reported as dead");
+                }
+                catch (Exception ex)
+                {
+                    failure = ex;
+                }
+            });
+            thread.SetApartmentState(System.Threading.ApartmentState.STA);
+            thread.Start();
+            thread.Join();
+            if (failure != null) throw new Exception("ActivationDescribe: " + failure.Message, failure);
+        }
+
+        /// <summary>A strip whose mouse handlers can be driven directly (no real cursor).</summary>
+        private sealed class ProbeStrip : TabStripControl
+        {
+            public void Down(int x, int y, System.Windows.Forms.MouseButtons b, int clicks = 1)
+            { OnMouseDown(new System.Windows.Forms.MouseEventArgs(b, clicks, x, y, 0)); }
+            public void Move(int x, int y, System.Windows.Forms.MouseButtons held)
+            { OnMouseMove(new System.Windows.Forms.MouseEventArgs(held, 0, x, y, 0)); }
+            public void Up(int x, int y, System.Windows.Forms.MouseButtons b)
+            { OnMouseUp(new System.Windows.Forms.MouseEventArgs(b, 1, x, y, 0)); }
+        }
+
+        private static void RunStripTest(string name, Action<ProbeStrip, System.Drawing.Rectangle[], List<int>, List<int>> body,
+            List<DocumentTabModel> tabs = null, List<int> closed = null)
+        {
+            Exception failure = null;
+            var thread = new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    using (var strip = new ProbeStrip())
+                    {
+                        strip.SetDpiOverride(96);
+                        strip.SetUserScale(1f);
+                        strip.Size = new System.Drawing.Size(900, 37);
+                        strip.CreateControl();
+                        var unused = strip.Handle;
+                        strip.SetNoActivateOnTabPress(true);   // the in-window (main) mode
+                        strip.UpdateTabs(tabs ?? new List<DocumentTabModel>
+                        {
+                            Tab(11, "Alpha.docx", active: true),
+                            Tab(22, "Bravo.docx"),
+                            Tab(33, "Charlie.docx")
+                        });
+                        var activated = new List<int>();
+                        var reordered = new List<int>();
+                        strip.TabActivateRequested += h => activated.Add(h);
+                        strip.ReorderRequested += (h, i) => reordered.Add(h);
+                        if (closed != null) strip.TabCloseRequested += h => closed.Add(h);
+                        var geo = strip.TabGeometryForTests();   // the tabs, then "+"
+                        Assert(geo.Length == 4, "three tabs and the plus button are laid out");
+                        body(strip, geo, activated, reordered);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failure = ex;
+                }
+            });
+            thread.SetApartmentState(System.Threading.ApartmentState.STA);
+            thread.Start();
+            thread.Join();
+            if (failure != null) throw new Exception(name + ": " + failure.Message, failure);
+        }
+
+        private static System.Drawing.Point Center(System.Drawing.Rectangle r)
+        {
+            return new System.Drawing.Point(r.Left + Math.Min(20, r.Width / 3), r.Top + r.Height / 2);
+        }
+
+        private static void TestStripMouseActivation()
+        {
+            RunStripTest("StripMouseActivation", (strip, geo, activated, reordered) =>
+            {
+                var onTab = Center(geo[1]);
+                var onPlus = new System.Drawing.Point(geo[3].Left + geo[3].Width / 2, geo[3].Top + geo[3].Height / 2);
+                strip.SetNoActivateOnTabPress(false);
+                Assert(!strip.ShouldSuppressMouseActivation(onTab, 0x0201),
+                    "off unless the host asks (the classic Custom Task Pane keeps the usual activation)");
+                strip.SetNoActivateOnTabPress(true);
+                Assert(strip.ShouldSuppressMouseActivation(onTab, 0x0201), "left press on a tab body -> no activation");
+                Assert(strip.ShouldSuppressMouseActivation(onTab, 0x0203),
+                    "the second press of a double click -> no activation either");
+                Assert(strip.ShouldSuppressMouseActivation(onTab, 0x0207),
+                    "middle press (close) -> no activation, the tabs must not shift before the release");
+                Assert(!strip.ShouldSuppressMouseActivation(onTab, 0x0204),
+                    "right press (context menu) keeps the activation - the menu needs its window in front");
+                Assert(!strip.ShouldSuppressMouseActivation(onPlus, 0x0201), "the + button keeps the activation");
+                Assert(!strip.ShouldSuppressMouseActivation(new System.Drawing.Point(geo[3].Right + 80, 18), 0x0201),
+                    "empty strip space keeps the activation");
+            });
+        }
+
+        private static void TestStripPressKeepsFocus()
+        {
+            Exception failure = null;
+            var thread = new System.Threading.Thread(() =>
+            {
+                try
+                {
+                    using (var form = new System.Windows.Forms.Form
+                    {
+                        StartPosition = System.Windows.Forms.FormStartPosition.Manual,
+                        Location = new System.Drawing.Point(-3000, -3000),
+                        ShowInTaskbar = false,
+                        Size = new System.Drawing.Size(950, 120)
+                    })
+                    {
+                        var box = new System.Windows.Forms.TextBox { Location = new System.Drawing.Point(0, 60), Width = 100 };
+                        var strip = new ProbeStrip { Location = new System.Drawing.Point(0, 0), Size = new System.Drawing.Size(900, 37) };
+                        form.Controls.Add(box);
+                        form.Controls.Add(strip);
+                        strip.SetDpiOverride(96);
+                        strip.SetNoActivateOnTabPress(true);   // the in-window (main) mode
+                        strip.UpdateTabs(new List<DocumentTabModel> { Tab(11, "Alpha.docx", active: true), Tab(22, "Bravo.docx") });
+                        form.Show();
+                        System.Windows.Forms.Application.DoEvents();
+                        box.Focus();
+                        System.Windows.Forms.Application.DoEvents();
+                        Assert(box.Focused, "precondition: the text box (standing in for Word's document) has the focus");
+
+                        var geo = strip.TabGeometryForTests();
+                        var p = Center(geo[1]);
+                        strip.Down(p.X, p.Y, System.Windows.Forms.MouseButtons.Left);
+                        System.Windows.Forms.Application.DoEvents();
+                        Assert(!strip.Focused && !strip.ContainsFocus, "the press did not move the focus onto the strip");
+                        Assert(box.Focused, "the document keeps the focus");
+                        strip.Up(p.X, p.Y, System.Windows.Forms.MouseButtons.Left);
+
+                        // The keyboard route stays: a press on empty strip space focuses the strip -
+                        // when its window is in front (a test runner is not always allowed to be).
+                        if (NativeFg() == form.Handle)
+                        {
+                            int emptyX = geo[geo.Length - 1].Right + 60;
+                            strip.Down(emptyX, 18, System.Windows.Forms.MouseButtons.Left);
+                            strip.Up(emptyX, 18, System.Windows.Forms.MouseButtons.Left);
+                            System.Windows.Forms.Application.DoEvents();
+                            Assert(strip.Focused, "a press on empty space gives the strip the keyboard focus");
+                        }
+                        form.Close();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failure = ex;
+                }
+            });
+            thread.SetApartmentState(System.Threading.ApartmentState.STA);
+            thread.Start();
+            thread.Join();
+            if (failure != null) throw new Exception("StripPressKeepsFocus: " + failure.Message, failure);
+        }
+
+        private static void TestStripJitterDragIsClick()
+        {
+            RunStripTest("StripJitterDragIsClick", (strip, geo, activated, reordered) =>
+            {
+                var p = Center(geo[1]);
+                var left = System.Windows.Forms.MouseButtons.Left;
+                strip.Down(p.X, p.Y, left);
+                strip.Move(p.X + 10, p.Y, left);   // past the drag threshold: a drag starts
+                strip.Move(p.X, p.Y, left);        // ...and comes back to the same slot
+                strip.Up(p.X, p.Y, left);
+                Assert(reordered.Count == 0, "nothing moved - no reorder");
+                Assert(activated.Count == 1 && activated[0] == 22, "the grabbed tab is activated (it was a click)");
+            });
+        }
+
+        private static void TestStripLostButtonUp()
+        {
+            RunStripTest("StripLostButtonUp", (strip, geo, activated, reordered) =>
+            {
+                var left = System.Windows.Forms.MouseButtons.Left;
+                var none = System.Windows.Forms.MouseButtons.None;
+                var p0 = Center(geo[0]);
+                var p2 = Center(geo[2]);
+                strip.Down(p0.X, p0.Y, left);
+                // the button-up never arrives; the mouse then just hovers across the strip
+                strip.Move(p0.X + 60, p0.Y, none);
+                strip.Move(p2.X, p2.Y, none);
+                strip.Down(p2.X, p2.Y, left);
+                strip.Up(p2.X, p2.Y, left);
+                Assert(reordered.Count == 0, "hovering after a lost button-up is not a drag");
+                Assert(activated.Count == 1 && activated[0] == 33, "the next real click works");
+            });
+        }
+
+        [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "GetForegroundWindow")]
+        private static extern IntPtr NativeFg();
+
+        private static void TestStripSnappedBackDragIsNotClick()
+        {
+            var tabs = new List<DocumentTabModel>
+            {
+                Tab(11, "Pinned1.docx", pinned: true),
+                Tab(22, "Pinned2.docx", pinned: true, active: true),
+                Tab(33, "Ordinary.docx")
+            };
+            RunStripTest("StripSnappedBackDragIsNotClick", (strip, geo, activated, reordered) =>
+            {
+                var left = System.Windows.Forms.MouseButtons.Left;
+                var p = Center(geo[2]);
+                strip.Down(p.X, p.Y, left);
+                for (int x = p.X - 10; x >= geo[0].Left + 5; x -= 20) strip.Move(x, p.Y, left);
+                strip.Up(geo[0].Left + 5, p.Y, left);   // dropped among the pinned tabs: not allowed
+                Assert(reordered.Count == 0, "the pin rule kept the ordinary tab after the pinned ones");
+                Assert(activated.Count == 0, "a long drag that was snapped back does not switch the document");
+            }, tabs);
+        }
+
+        private static void TestStripMiddleClickSameTab()
+        {
+            var closed = new List<int>();
+            RunStripTest("StripMiddleClickSameTab", (strip, geo, activated, reordered) =>
+            {
+                var middle = System.Windows.Forms.MouseButtons.Middle;
+                var p1 = Center(geo[1]);
+                var p2 = Center(geo[2]);
+                strip.Down(p1.X, p1.Y, middle);
+                strip.Up(p2.X, p2.Y, middle);   // the tabs moved under the cursor between press and release
+                Assert(closed.Count == 0, "released on another tab: nothing is closed");
+                strip.Down(p2.X, p2.Y, middle);
+                strip.Up(p2.X, p2.Y, middle);
+                Assert(closed.Count == 1 && closed[0] == 33, "pressed and released on the same tab: that tab closes");
+            }, null, closed);
+        }
+
+        private static void TestStripRealDragReorders()
+        {
+            RunStripTest("StripRealDragReorders", (strip, geo, activated, reordered) =>
+            {
+                var left = System.Windows.Forms.MouseButtons.Left;
+                var p0 = Center(geo[0]);
+                int target = geo[2].Right - 5;
+                strip.Down(p0.X, p0.Y, left);
+                for (int x = p0.X + 10; x <= target; x += 20) strip.Move(x, p0.Y, left);
+                strip.Move(target, p0.Y, left);
+                strip.Up(target, p0.Y, left);
+                Assert(reordered.Count == 1 && reordered[0] == 11, "the first tab was moved");
+                Assert(activated.Count == 0, "a real drag does not activate anything");
+            });
         }
     }
 }

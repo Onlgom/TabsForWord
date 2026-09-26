@@ -77,14 +77,18 @@ $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
 W (T 'TabsForWord - diagnostic report' 'TabsForWord - диагностический отчёт')
 W ((T 'Date: {0}, computer: {1}, user: {2}' 'Дата: {0}, компьютер: {1}, пользователь: {2}') -f `
     (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $env:COMPUTERNAME, $env:USERNAME)
-W ((T 'Diagnostics script version: {0}' 'Версия скрипта диагностики: {0}') -f '1.5')
+W ((T 'Diagnostics script version: {0}' 'Версия скрипта диагностики: {0}') -f '1.6')
 
 # ---------------------------------------------------------------- система
 Section (T 'System' 'Система')
 try {
     $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+    # The registry ProductName still says "Windows 10" on Windows 11; the build number
+    # tells them apart (Windows 11 starts at build 22000).
+    $productName = [string]$cv.ProductName
+    try { if ([int]$cv.CurrentBuild -ge 22000) { $productName = $productName -replace 'Windows 10', 'Windows 11' } } catch { }
     W ((T 'Windows: {0} {1} (build {2}.{3})' 'Windows: {0} {1} (сборка {2}.{3})') -f `
-        $cv.ProductName, $cv.DisplayVersion, $cv.CurrentBuild, $cv.UBR)
+        $productName, $cv.DisplayVersion, $cv.CurrentBuild, $cv.UBR)
 } catch {
     W ((T 'Windows: could not read the version: {0}' 'Windows: ошибка чтения версии: {0}') -f $_.Exception.Message)
 }
@@ -408,7 +412,9 @@ $SeriousPatterns = @(
     'Reserve mode suspended',
     'native-host.cfg read failed',
     'Locator: GetClientRect failed',
-    'Locator snapshot failed'
+    'Locator snapshot failed',
+    # 1.7.3: переключение вкладкой не удержалось (окно не вышло вперёд или его вернули назад)
+    'Activate check: target'
 )
 # Предупреждения, штатные для переходных состояний (окно строится/закрывается).
 $TransientPatterns = @(

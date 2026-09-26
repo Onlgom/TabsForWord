@@ -47,6 +47,9 @@ namespace TabsForWord.NativeHost
         public void Init(DocumentWindowManager manager)
         {
             _manager = manager;
+            // After every switch (click, Enter, the all-tabs menu, Ctrl+Tab) the focus goes
+            // back to the document of the activated window if our strip still holds it.
+            _manager.SetAfterActivate(RestoreFocusToDocument);
             _winEvents = new WinEventHookService(OnWindowLocationChanged);
             _winEvents.Install();
             LoggingService.Info("Native host mode enabled");
@@ -254,9 +257,9 @@ namespace TabsForWord.NativeHost
 
         internal void HandleTabActivate(int hwnd)
         {
-            if (_manager == null) return;
-            _manager.ActivateWindow(hwnd);
-            RestoreFocusToDocument(hwnd);
+            // Posted: the switch runs once the click is fully over (RequestActivate), and
+            // the focus is returned to the document right after it (SetAfterActivate in Init).
+            if (_manager != null) _manager.RequestActivate(hwnd, "tab");
         }
 
         internal void HandleTabClose(int hwnd)

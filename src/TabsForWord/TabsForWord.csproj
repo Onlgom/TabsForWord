@@ -8,7 +8,7 @@
     <Platforms>AnyCPU</Platforms>
     <RootNamespace>TabsForWord</RootNamespace>
     <AssemblyName>TabsForWord</AssemblyName>
-    <Version>1.7.2</Version>
+    <Version>1.7.3</Version>
     <Company>TabsForWord</Company>
     <Product>Tabs for Microsoft Word</Product>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>

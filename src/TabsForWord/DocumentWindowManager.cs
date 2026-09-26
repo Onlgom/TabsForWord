@@ -32,6 +32,18 @@ namespace TabsForWord
         private bool _startupOrderApplied;          // the stored order is restored once, at startup
         private bool _disposed;
 
+        // Tab switching (see RequestActivate)
+        private Control _invoker;                   // hidden control: posts the switch to the end of the queue
+        private ActivationWatch _watch;             // checks that the target stayed in front
+        private int _pendingHwnd;                   // 0 = nothing queued
+        private string _pendingOrigin;
+        private int _pendingAdjacent;               // Ctrl+Tab steps queued (+1 / -1), 0 = none
+        private int _pendingRequestTick;            // when the (first) queued request was made
+        private bool _activationPosted;
+        private int _lastActivatedHwnd;
+        private int _lastActivatedTick;
+        private Action<int> _afterActivate;         // the host returns the focus to the document
+
         public DocumentWindowManager(Word.Application word, ITabPaneSync paneManager)
         {
             _word = word;
@@ -47,6 +59,21 @@ namespace TabsForWord
             _pollTimer.Tick += OnPollTick;
             _pollTimer.Start();
 
+            // Start() runs on Word UI thread: the marshalling control and the watch timer
+            // belong to it. A failure here only costs the deferral (switches then run inline).
+            try
+            {
+                _invoker = new Control();
+                _invoker.CreateControl();
+                var unused = _invoker.Handle;
+            }
+            catch (Exception ex)
+            {
+                LoggingService.Error("Activation invoker creation failed; switching runs inline", ex);
+                _invoker = null;
+            }
+            _watch = new ActivationWatch();
+
             // Ctrl+Tab / Ctrl+Shift+Tab (specification 2b, section 8) - can be switched off
             // in the settings window (docs/KNOWN_ISSUES.md O8: it shadows the ordinary tab
             // key inside tables). Start() runs on Word UI thread - the hook goes onto it.
@@ -58,8 +85,29 @@ namespace TabsForWord
         private void InstallHotkey()
         {
             if (_keyboardHook != null) return;
-            _keyboardHook = new KeyboardHookService(() => ActivateAdjacent(1), () => ActivateAdjacent(-1));
+            _keyboardHook = new KeyboardHookService(() => RequestAdjacent(1), () => RequestAdjacent(-1),
+                IsWordDocumentWindowInFront);
             _keyboardHook.Install();
+        }
+
+        /// <summary>
+        /// Ctrl+Tab belongs to us only while a Word document window is in front and not
+        /// disabled by a modal dialog. In Word's own dialogs (Font, Paragraph: they have
+        /// tabs of their own) and in any other window the key goes on untouched.
+        /// </summary>
+        private static bool IsWordDocumentWindowInFront()
+        {
+            var fg = NativeHost.NativeWin32.GetForegroundWindow();
+            return WindowActivator.IsOurWordFrame(fg) && NativeHost.NativeWin32.IsWindowEnabled(fg);
+        }
+
+        /// <summary>
+        /// The host's hook called after every tab switch (the in-window host returns the
+        /// input focus to the document of the activated window).
+        /// </summary>
+        public void SetAfterActivate(Action<int> callback)
+        {
+            _afterActivate = callback;
         }
 
         public void Dispose()
@@ -71,6 +119,8 @@ namespace TabsForWord
                 if (_debounceTimer != null) { _debounceTimer.Stop(); _debounceTimer.Dispose(); _debounceTimer = null; }
                 if (_pollTimer != null) { _pollTimer.Stop(); _pollTimer.Dispose(); _pollTimer = null; }
                 if (_keyboardHook != null) { _keyboardHook.Dispose(); _keyboardHook = null; }
+                if (_watch != null) { _watch.Dispose(); _watch = null; }
+                if (_invoker != null) { _invoker.Dispose(); _invoker = null; }
             }
             catch (Exception ex)
             {
@@ -315,14 +365,108 @@ namespace TabsForWord
         // User actions (called from TabStripControl through TabPaneManager)
         // ------------------------------------------------------------------
 
-        /// <summary>Click on a tab: activate the corresponding window.</summary>
-        public void ActivateWindow(int hwnd)
+        /// <summary>
+        /// A tab click, Enter on the strip or a row of the all-tabs menu: switch to the
+        /// window. The switch itself is posted to the end of Word's message queue: the
+        /// mouse button is released and the capture dropped before anything is
+        /// activated, and whatever Word queued in reaction to the press runs first
+        /// instead of racing the switch. The second press of a double click is not a
+        /// second switch.
+        /// </summary>
+        public void RequestActivate(int hwnd, string origin)
+        {
+            if (_disposed) return;
+            try
+            {
+                if (hwnd == _lastActivatedHwnd &&
+                    unchecked(Environment.TickCount - _lastActivatedTick) < SystemInformation.DoubleClickTime &&
+                    NativeHost.NativeWin32.GetForegroundWindow() == new IntPtr(hwnd))
+                    return;
+
+                if (_pendingHwnd == 0 && _pendingAdjacent == 0) _pendingRequestTick = Environment.TickCount;
+                _pendingHwnd = hwnd;
+                _pendingOrigin = origin;
+                _pendingAdjacent = 0;   // an explicit target wins over queued Ctrl+Tab steps
+                PostActivation();
+            }
+            catch (Exception ex)
+            {
+                LoggingService.Error("RequestActivate failed", ex);
+            }
+        }
+
+        /// <summary>Ctrl+Tab / Ctrl+Shift+Tab from the keyboard hook: the same posting.</summary>
+        private void RequestAdjacent(int delta)
+        {
+            if (_disposed) return;
+            if (_pendingHwnd == 0 && _pendingAdjacent == 0) _pendingRequestTick = Environment.TickCount;
+            _pendingHwnd = 0;
+            _pendingAdjacent += delta;
+            PostActivation();
+        }
+
+        private void PostActivation()
+        {
+            if (_activationPosted) return;   // the queued callback picks up the latest request
+            var invoker = _invoker;
+            if (invoker != null && !invoker.IsDisposed && invoker.IsHandleCreated)
+            {
+                _activationPosted = true;
+                try
+                {
+                    invoker.BeginInvoke(new Action(RunPendingActivation));
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    // Never leave the flag up: every later switch would be dropped silently.
+                    _activationPosted = false;
+                    LoggingService.Error("Posting the switch failed; running it inline", ex);
+                }
+            }
+            RunPendingActivation();
+        }
+
+        private void RunPendingActivation()
+        {
+            _activationPosted = false;
+            try
+            {
+                if (_disposed) return;
+                int hwnd = _pendingHwnd;
+                string origin = _pendingOrigin;
+                int steps = _pendingAdjacent;
+                int requestTick = _pendingRequestTick;
+                _pendingHwnd = 0;
+                _pendingAdjacent = 0;
+
+                if (hwnd != 0) ActivateWindow(hwnd, origin, requestTick);
+                else if (steps != 0) ActivateAdjacent(steps, requestTick);
+            }
+            catch (Exception ex)
+            {
+                LoggingService.Error("Posted activation failed", ex);
+            }
+        }
+
+        /// <summary>
+        /// Activate the window of a tab: un-minimise (keeping "maximised"), COM activation,
+        /// Win32 raise, then a short check that the window really stayed in front.
+        /// </summary>
+        public void ActivateWindow(int hwnd, string origin)
+        {
+            ActivateWindow(hwnd, origin, Environment.TickCount);
+        }
+
+        /// <param name="requestTick">when the user asked for the switch (the click, the key press)</param>
+        private void ActivateWindow(int hwnd, string origin, int requestTick)
         {
             try
             {
                 var tab = _tabs.FirstOrDefault(t => t.Hwnd == hwnd);
                 if (tab != null && tab.IsProtectedView)
                 {
+                    if (_watch != null) _watch.Cancel();
                     ActivateProtectedView(hwnd);
                     return;
                 }
@@ -334,27 +478,42 @@ namespace TabsForWord
                     catch (COMException) { continue; }
                     if (!match) continue;
 
+                    var h = new IntPtr(hwnd);
+                    var fgBefore = NativeHost.NativeWin32.GetForegroundWindow();
+                    string from = WindowActivator.Describe(fgBefore);
+                    int t0 = Environment.TickCount;
+
+                    // Win32 un-minimise first: a window minimised from the maximised state
+                    // comes back maximised (the COM WindowState=Normal used before made it an
+                    // ordinary window).
+                    WindowActivator.RestoreIfMinimized(h);
+
                     // COM activation. Its failure must not cancel the Win32 raise below.
-                    try
-                    {
-                        if (w.WindowState == Word.WdWindowState.wdWindowStateMinimize)
-                            w.WindowState = Word.WdWindowState.wdWindowStateNormal;
-                        w.Activate();
-                    }
+                    try { w.Activate(); }
                     catch (COMException ex)
                     {
                         LoggingService.Warn("Activate (COM) failed for hwnd=" + hwnd + ": " + ex.Message);
                     }
 
                     // Win32 raise: SetForegroundWindow can fail silently during activation
-                    // transitions (a mix of maximised and ordinary windows) - BringWindowToTop
-                    // additionally raises the window in the z-order.
-                    var h = new IntPtr(hwnd);
-                    NativeMethods.SetForegroundWindow(h);
-                    NativeMethods.BringWindowToTop(h);
+                    // transitions - BringWindowToTop additionally raises the window in the z-order.
+                    bool sfw = WindowActivator.Raise(h);
+                    var fgAfter = NativeHost.NativeWin32.GetForegroundWindow();
 
-                    LoggingService.Info("Window activated: hwnd=" + hwnd);
+                    // The prefix "Window activated: hwnd=N" is what the E2E scripts look for.
+                    LoggingService.Info("Window activated: hwnd=" + hwnd + " (" + origin +
+                        ", sfw=" + (sfw ? 1 : 0) +
+                        ", " + (fgAfter == h ? "in front" : "NOT in front: " + WindowActivator.Describe(fgAfter)) +
+                        ", from " + from + " to " + WindowActivator.Describe(h) +
+                        ", " + unchecked(Environment.TickCount - t0) + " ms)");
+
+                    _lastActivatedHwnd = hwnd;
+                    _lastActivatedTick = Environment.TickCount;
                     Reconcile("activate");
+                    if (_watch != null) _watch.Start(h, fgBefore, requestTick);
+
+                    var after = _afterActivate;
+                    if (after != null) after(hwnd);
                     return;
                 }
                 LoggingService.Warn("Activate: window not found, hwnd=" + hwnd);
@@ -690,8 +849,16 @@ namespace TabsForWord
             }
         }
 
-        /// <summary>Ctrl+Tab / Ctrl+Shift+Tab: next (+1) / previous (-1) tab, wrapping around.</summary>
+        /// <summary>
+        /// Ctrl+Tab / Ctrl+Shift+Tab: next (+1) / previous (-1) tab, wrapping around.
+        /// Several key presses queued before the switch ran arrive as one delta (+2 = two tabs on).
+        /// </summary>
         public void ActivateAdjacent(int delta)
+        {
+            ActivateAdjacent(delta, Environment.TickCount);
+        }
+
+        private void ActivateAdjacent(int delta, int requestTick)
         {
             try
             {
@@ -699,9 +866,9 @@ namespace TabsForWord
                 int current = _tabs.FindIndex(t => t.IsActive);
                 int next = current < 0
                     ? 0
-                    : (current + delta % _tabs.Count + _tabs.Count) % _tabs.Count;
+                    : ((current + delta) % _tabs.Count + _tabs.Count) % _tabs.Count;
                 if (next == current) return;
-                ActivateWindow(_tabs[next].Hwnd);
+                ActivateWindow(_tabs[next].Hwnd, "ctrl-tab", requestTick);
             }
             catch (Exception ex)
             {

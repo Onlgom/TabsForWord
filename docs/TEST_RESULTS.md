@@ -1,7 +1,8 @@
 # TEST_RESULTS.md
 
 Date: 2026-07-23. Environment: Windows 11 Pro x64, Microsoft 365 Word x64
-(16.0.20131.20154).
+(16.0.20131.20154). That date and environment apply to the first sections (up to
+stage 8); every later section names its own date, version and machine.
 
 Statuses: PASS / FAIL / NOT TESTED / BLOCKED
 
@@ -21,6 +22,10 @@ Statuses: PASS / FAIL / NOT TESTED / BLOCKED
 | A10 | LoggingService: writing an entry with an exception | PASS | |
 
 Result: 10/10 PASS.
+
+(As of 2026-07-23. The suite has grown with every stage since - each later
+section gives its own count, the latest being 68/68 in stage 37. The "*"
+unsaved indicator of A2 and B11 has since become a dot.)
 
 ## Integration tests on a real Word
 
@@ -82,6 +87,11 @@ screenshots.
 | D6 | Word neither crashes nor hangs across the whole test session | PASS | LoadBehavior=3, DisabledItems empty |
 
 ## Not tested / testing limitations
+
+As of 2026-07-23 (stage 8). Several items were covered later: multi-DPI in the
+per-monitor DPI sections (stage 15 and the three-monitor run), Word 2024 in the
+field (machines A and B, stage 23). Still NOT TESTED: Word 2016/2019/2021 and
+32-bit Word.
 
 - The tooltip (B13): the code and the control's unit test were checked, but the
   popup itself was never captured in a screenshot.
@@ -395,7 +405,9 @@ Result: 12/12 PASS.
 NOT TESTED (no suitable machine - verified by simulating the logic, not live):
 - **a machine without .NET 4.8 or with an old version** - both fatal branches of
   Q6 were checked by running the logic with substituted values rather than on a
-  real system (compare limitation O16: Windows 10 has never been run at all);
+  real system (compare limitation O16: as of 2026-07-26 Windows 10 had never
+  been run at all; machine C gave the first, clean, Windows 10 field report on
+  2026-07-28 - see stage 34);
 - **a machine with no Word installed** - the fatal "Word not found" branch was
   never exercised live; on this machine all three signals fired independently
   (Q3-Q5), so only the "Word is present" scenario is confirmed;
@@ -413,9 +425,12 @@ NOT TESTED (deliberately not run):
 
 ## Field reports from two machines + fixes (2026-07-26, v1.5.1, stage 23)
 
-Input: two Diagnostics ZIP reports (machines A and B, both Windows 10 Pro 25H2
+Input: two Diagnostics ZIP reports (machines A and B, both Windows 11 Pro 25H2
 26200.8875, Word x64 16.0.17932.20884 ProPlus2024, DLL v1.5.0 with the same
-SHA256, DPI 150 %). Both installations succeeded, the strip worked, 0 ERROR, Word
+SHA256, DPI 150 %). The reports themselves said "Windows 10 Pro 25H2":
+Diagnostics up to 1.5 printed the registry ProductName, which still reads
+"Windows 10" on Windows 11; build 26200 is Windows 11 25H2 (Diagnostics 1.6
+labels build 22000 and later as Windows 11, see stage 37). Both installations succeeded, the strip worked, 0 ERROR, Word
 did not crash, and Resiliency never disabled our add-in.
 
 | # | Check | Result | Details |
@@ -768,7 +783,8 @@ carries the account name of the machine it was built on.
 A Diagnostics report arrived from machine C - and it was a clean one: Windows 10
 Pro 22H2 (19045.6456), Word x64 16.0.20228.20110 (consumer M365), 100 % scaling,
 Russian Word. All three of those are new ground for the field: the earlier
-reports came from Windows 10 25H2, Word 16.0.17932 and 150 % scaling. The install
+reports came from Windows 11 25H2 (build 26200), Word 16.0.17932 and 150 %
+scaling, so C was the first Windows 10 run of any kind. The install
 log is flawless, both registry views are correct, LoadBehavior=3, zero ERROR
 lines, no Resiliency entry of ours, nothing in the Windows event log, and the
 person said everything worked.
@@ -790,8 +806,9 @@ Word with the File menu (Backstage) open, for about 84 seconds. See ADR-017.
 Reasoning about the code said that returning "failure" for the File menu would,
 with a SINGLE Word window open, reach the manager's threshold of five failed
 syncs and switch the add-in to the CTP fallback. Reasoning is not evidence, so
-the previous build was run against a live Word - the 1.7.0 DLL is still in
-`release/TabsForWord-Installer/`, so the control run cost one start of Word.
+the previous build was run against a live Word - at the time the 1.7.0 DLL was
+still in the package folder under `release/` (it has since been replaced by
+1.7.2), so the control run cost one start of Word.
 
 | # | Check | Result | Details |
 |---|---|---|---|
@@ -956,3 +973,197 @@ the day before publication would mean a full E2E round for a readability gain, s
 they stay as they are. The two "#RRGGBB" parsers (`TabColorStore.ParseRgb` and
 `TabHostSettings.ParseColor`) also stay separate: merging them would tie the
 window-host settings to the tab colour store for eight lines of arithmetic.
+
+## Stage 37 (v1.7.3, 2026-09-26) - tab switching, the ruler after a move, AutoSave
+
+Environment for everything measured here: the development machine - Windows 11
+Pro 25H2 (build 26200), Word M365 x64 16.0.20326, ONE monitor 1920x1080 at
+100 %, tab-size multiplier 1.3 (a 48 px strip). Clicks and drags were real mouse
+input driven by a script, on temporary documents only. Check IDs restart in every
+section (R8, for example, exists both in stage 23 and in the rename subsection),
+so cite a check by section and ID.
+
+### Tab switching: a click that did not switch
+
+The report: now and then a click on a tab presses the tab but the window does not
+change, perhaps because some windows are maximised and some are not. The user's
+own add-in log of 2026-09-17 showed the same tab requested three times within
+7 s, and the same pattern twice more; each time the PREVIOUS window's document
+area was re-laid out about 1.3-2 s after the click ("Reserve: anchor moved"). The
+old log line "Window activated" was written unconditionally, so the log could
+not show whether a switch stuck. The Windows Application log of that day also
+has a Word hang (AppHang, event 1002) and GPU driver timeouts (LiveKernelEvent
+141) - system-level issues the add-in does not cause, but they can make a switch
+look as if it did not happen.
+
+The reproduction on v1.7.2 (4 temporary documents, maximised and normal windows
+mixed):
+
+| # | Check | Result | Details |
+|---|---|---|---|
+| W1 | Clicks on the strip of the FOREGROUND window, mixed window states | PASS | 40/40 switched |
+| W2 | The same with Word's full-screen mode (View.FullScreen) | PASS | 30/30; Word's full-screen mode applies to ALL Word windows at once |
+| W3 | Clicks on the strip of a BACKGROUND (visible, non-active) normal window, 28 px inside a tab | PASS | 30/30 |
+| W4 | The same, 6 px inside the tab's left edge | **FAIL (reproduced)** | 3/30 missed: the window whose strip was clicked came to the front instead of the requested one |
+
+W4 only exists with non-maximised windows - with every window maximised only the
+foreground window's strip is visible - which matches the "windowed vs full
+screen" remark. The root cause, confirmed by the reproduction and by the code:
+the press itself activated the background window (WM_MOUSEACTIVATE went up to
+OpusApp, and `OnMouseDown` gave the strip the focus, which also activates an
+inactive top-level window). Word's WindowActivate made that window's tab the
+active one; the active tab is wider (semibold caption, always-visible close box),
+so the tabs shifted under the cursor BEFORE the click was resolved, and the click
+landed on the neighbouring tab (often the clicked window's own) or on empty
+space.
+
+Other defects found by analysis and fixed together: restoring a minimised window
+through COM `WindowState = Normal` turned a maximised window into an ordinary one
+(which itself creates the mix of states); a double click on a tab performed two
+switches; a "drag" that ended where it started swallowed the click, and a lost
+button-up could turn plain hovering into a phantom drag; middle-click (close) on
+a background window's tab could close the NEIGHBOURING tab, and the context menu
+could open for the neighbour; the Ctrl+Tab hook also fired inside Word's own
+dialogs that have tabs (Font, Paragraph).
+
+What v1.7.3 does: in the in-window mode a left or middle press on a tab answers
+WM_MOUSEACTIVATE (and WM_POINTERACTIVATE for touch/pen) with "no activate" and no
+longer takes the focus; the hit is taken on the layout the user saw; the switch is
+posted to run after the click is over and double-click presses are de-duplicated;
+minimised windows are restored with SC_RESTORE; the result of every switch is
+logged ("Window activated: hwnd=N (tab, sfw=1, in front, from ... to ..., 31 ms)");
+a check at +250 ms and +1200 ms writes a WARN "Activate check: target ... is not
+in front ..." and re-raises the target ONCE, only if the foreground went back to
+the window the switch started from and there was no input since the click. The
+classic Custom Task Pane mode keeps the old press behaviour.
+
+The results on v1.7.3 (the final build):
+
+| # | Check | Result | Details |
+|---|---|---|---|
+| W5 | Background-strip clicks 6 px from the tab's left edge (the W4 case) | PASS | 0/40 missed (was 3/30) |
+| W6 | Foreground-strip clicks, mixed window states | PASS | 0/30 missed |
+| W7 | The add-in log for those 70 switches | PASS | no "Activate check" warning, no ERROR |
+| W8 | Word itself undoing a switch (the 2026-09-17 pattern) | NOT TESTED | not reproduced, so not proven either way; if it happens, 1.7.3 logs it and recovers once - field logs of 1.7.3 will tell |
+| W9 | Touch/pen press on a tab (WM_POINTERACTIVATE) | NOT TESTED | no touch or pen device on this machine |
+| W10 | Middle-click close and the context menu on a BACKGROUND window's tab, live | NOT TESTED | the rule is covered by unit tests (the WM_MOUSEACTIVATE decision incl. the middle button, middle click on the same tab) |
+| W11 | Double click on a tab = one switch; restoring a minimised maximised window keeps it maximised; Ctrl+Tab ignored inside the Font/Paragraph dialogs | NOT TESTED | fixed in the code, no live check was run for these |
+| W12 | The classic Custom Task Pane mode (press behaviour unchanged) and switching between the modes | NOT TESTED | this stage ran only the in-window mode |
+| W13 | Switching across several monitors | NOT TESTED | one monitor in this stage |
+
+An intermediate build had 1 miss in 22, traced to the test harness itself;
+another intermediate run was 0/40. Only the final-build numbers are in W5-W7.
+
+### The ruler after moving the window
+
+The request: halve the time it takes the ruler to reappear after the window is
+moved. The mechanism: in reserve mode, after a SIZE change Word re-lays out its
+window and puts its document container (`_WwF`) back at the natural top, so the
+strip covers the ruler until the add-in shifts the anchor again. v1.7.2 waited
+for 125 ms of quiet (SizeSettleMs) and then did nothing until the next WinEvent
+or the ~1 Hz poll - after a snap or a maximise nothing else happens, so the ruler
+waited up to ~1.1 s.
+
+Measured with a real mouse drag of the title bar, sampling the geometry every
+~17 ms (n = repetitions):
+
+| Gesture | v1.7.2 | v1.7.3 |
+|---|---|---|
+| Move a normal window (no size change) | the ruler is never covered | the ruler is never covered |
+| Drag a MAXIMISED window by its caption (it restores mid-drag) | covered ~150 ms at the restore, back before release | the same |
+| Drag to the top edge and release (Aero Snap maximise) | anchor fixed 219-844 ms after release, median **751 ms** (n=6) | median **207 ms** (n=8, dev build), **237 ms** (n=6, final build); ruler visibly painted: median 269 ms |
+| Drag to the left edge (snap to the left half) | not measured | anchor median 221 ms, ruler visibly painted 284 ms (n=8) |
+
+The add-in log of the final run: "anchor moved ... N ms after the resize began",
+values 125-250 ms (median ~156).
+
+What v1.7.3 does: a one-shot timer per host fires exactly when the quiet period
+ends instead of waiting for the poll; while the user still drags (Word's thread
+in a move/size loop, or a mouse button held) it only re-checks every 50 ms and
+does not move the anchor; a re-entrancy guard stops a nested layout pass from
+shifting the anchor twice; every fit that answers a resize is logged with its
+delay. SizeSettleMs stays 125 ms: Word's own follow-up layout pass was observed
+~80 ms after a size change, and a shorter quiet time would move the anchor before
+it and cause a second fit (visible flicker).
+
+| # | Check | Result | Details |
+|---|---|---|---|
+| Y1 | Aero Snap maximise: time until the anchor is fitted | PASS | median 751 -> 237 ms on the final build - more than 3x faster (the request was 2x) |
+| Y2 | Moving a normal window never covers the ruler | PASS | both versions |
+| Y3 | A live resize by the window edge does not make the page jump on every pause | NOT TESTED | by design (no anchor move while a button is held); not measured separately |
+| Y4 | The TickCount wrap bug found by the review | FIXED, live NOT TESTED | `Environment.TickCount` is negative for half of every 49.7 days of uptime; tick fields that started at 0 broke the quiet-period check (no fit until the first resize), the oscillation window of the reserve guard (ordinary fits added up over hours until the guard suspended the reservation and, after three times, gave it up for the session) and the background sampling. All tick fields now start "long ago" and the quiet period has its own flag. A live check would need 24.9+ days of uptime |
+| Y5 | e2e-reserve-mode.ps1 could not fail its "no fight loop" check | FIXED | it counted the log line "Reserve: anchor shifted", which the add-in no longer writes (it writes "Reserve: anchor moved"); fixed, plus new steps "anchor fits are logged" and "no oscillation suspension". Its result is in the full E2E set below |
+
+### AutoSave: a save on every switch (not an add-in bug)
+
+The report: with AutoSave on, every edit is saved as soon as the user switches to
+another document; the unsaved dot disappears and switching away from such a tab
+lags. This is the AutoSave switch in Word's title bar, for OneDrive/SharePoint
+files. The add-in never calls Save/SaveAs and never cancels a save
+(DocumentBeforeSave only schedules a reconcile).
+
+The experiment: two temporary test documents in the user's OneDrive (with the
+user's permission; deleted afterwards), opened by Word as cloud documents with
+AutoSave on. Each repetition: type 3 characters, wait 250 ms, switch, poll
+`Document.Saved`.
+
+| Method | Saved after the switch |
+|---|---|
+| No switch (baseline) | 1 of 4 repetitions saved after 7.4 s; 3 of 4 not saved within 12 s |
+| Tab click (the add-in, v1.7.2) | 219-312 ms (4/4) |
+| Alt+Tab | 218-281 ms (4/4); the target window comes to the front only after the save |
+| SetForegroundWindow from outside Word | 0-15 ms (3/3) |
+| Word's own Window.Activate (COM from outside) | 125 ms (3/3) |
+| Alt+Tab with the add-in DISCONNECTED (COMAddIns...Connect = False) | 218-234 ms (3/3) |
+
+The conclusion: Word's AutoSave saves a changed cloud document as soon as its
+window loses activation, synchronously, whatever does the switching - with or
+without the add-in; the next window comes forward only after that save, which is
+the lag the user notices. The add-in will not turn AutoSave off behind the user's
+back (the rule: never change how the user's documents are saved). What the user
+can do is written in docs/INSTALL_EN.md and docs/INSTALL_RU.md ("Word saves the
+document every time I switch tabs").
+
+| # | Check | Result | Details |
+|---|---|---|---|
+| AS1 | The add-in does not save documents | PASS | by reading the code, and the Alt+Tab row with the add-in disconnected |
+| AS2 | The same experiment on v1.7.3 | NOT TESTED | the switching change does not touch saving; the cloud test documents were deleted after the v1.7.2 run |
+
+### Verification of the change
+
+| # | Check | Result | Details |
+|---|---|---|---|
+| V1 | Unit tests | PASS | 68/68 (58 before; +10: the retry rule, input-since with tick wrap, Describe never reads the window title, the WM_MOUSEACTIVATE decision incl. the middle button, a press keeps the focus and empty space gives it, a jitter drag is a click, a lost button-up, a real drag reorders, a snapped-back drag is not a click, middle click on the same tab) |
+| V2 | An independent code review of the change (4 reviewers) | 13 FIXED, 7 rejected | 20 findings, 13 confirmed after verification and all fixed (the watch clock taken from the request, middle/right click on background tabs, tick wrap, the focus route, the snapped-back drag, the held-button gate for the timer, the accuracy of the settle log, touch activation, the E2E grep, temporary diagnostic logging removed); 7 rejected with reasons |
+| V3 | install.ps1 and Diagnostics 1.6 label build 22000 and later as Windows 11 | PASS (parsing) | both scripts parse without errors (`[Parser]::ParseFile` in PowerShell 5.1). Up to 1.5 they printed the registry ProductName, which says "Windows 10" on Windows 11 |
+| V4 | Diagnostics 1.6 classifies "Activate check: target" as a serious warning | PASS (by inspection) | the pattern is in the serious list; no real log with that warning exists yet |
+| V5 | A live run of the changed install.ps1 and of diagnose.ps1 1.6 | PASS | the package release/TabsForWord-Installer was installed with its install.ps1 (all registration checks OK, DLL 1.7.3.0) and diagnose.ps1 was run: both print "Windows 11 Pro 25H2 (build 26200.…)" on the development machine, where 1.5 printed "Windows 10 Pro". The summary listed 6 ERROR lines - all of them "Test error marker", written into the real add-in log by the unit test of LoggingService (a pre-existing nit of the test suite, left for a later fix: the test should write to a temporary log) |
+
+### Full E2E set
+
+Run 2026-09-26 16:04-16:15 on the development machine (one monitor, 100 %), the v1.7.3 build installed by
+every script itself, one script at a time, nobody touching the mouse or keyboard. Flake policy: one repeat of a
+failed script - not needed.
+
+| ID | Script | Result | Steps |
+|---|---|---|---|
+| W1 | e2e-smoke.ps1 | PASS | 10/10 |
+| W2 | e2e-default-mode.ps1 | PASS | 10/10 |
+| W3 | e2e-backstage.ps1 | PASS | 12/12 |
+| W4 | e2e-language.ps1 | PASS | 8/8 |
+| W5 | e2e-tab-colors.ps1 | PASS | 15/15 |
+| W6 | e2e-tab-colors-dialog.ps1 | PASS | 7/7 |
+| W7 | e2e-tab-size.ps1 | PASS | 9/9 |
+| W8 | e2e-dpi-monitors.ps1 | PASS (single monitor) | 6/6 - the script itself notes that all monitors share one scale, so DPI virtualisation was NOT exercised |
+| W9 | e2e-side-panes.ps1 | PASS | 7/7 |
+| W10 | e2e-overflow-scroll.ps1 | PASS | 7/7 |
+| W11 | e2e-reserve-mode.ps1 | PASS | 13/13 - with the corrected log pattern it now really counts the fits: 2 after the idle phase, 6 in total (bound 25); no suspension, no give-up |
+| W12 | e2e-overlay-interaction.ps1 | PASS | 9/9 (includes Ctrl+Tab) |
+| W13 | e2e-overlay-buttons-pv.ps1 | PASS | 15/15 (includes Protected View) |
+| W14 | e2e-settings-pins-order.ps1 | PASS | 25/25 (includes Ctrl+Tab and dragging tabs) |
+
+14/14 scripts, 153 steps, 0 failures, 0 repeats, 11 minutes.
+
+After this run one more defensive change went in (if posting the switch with BeginInvoke ever throws, the
+"switch queued" flag is cleared and the switch runs inline, instead of every later switch being dropped). On that
+final build: unit tests 68/68, e2e-smoke 10/10, e2e-overlay-interaction 9/9, e2e-settings-pins-order 25/25.

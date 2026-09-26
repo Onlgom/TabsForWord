@@ -25,6 +25,8 @@ namespace TabsForWord.NativeHost
         private const int LocateRetryMs = 500;   // do not search for the zone more often than every 500 ms
         private const int SizeSettleMs = 125;    // quiet time after a resize before the anchor is moved
                                                  // (was 250; halved - the ruler comes back faster)
+        private const int SettleSlackMs = 16;    // one timer granule past the end of the quiet time
+        private const int MoveSizePollMs = 50;   // while the user still drags the window/frame
         private const int ZoneUpgradeMs = 3000;  // how often to try upgrading a degraded zone to a proper one
         private const int ZoneUpgradeAttempts = 10; // how many such attempts to make (then the layout counts as non-standard)
 
@@ -74,7 +76,16 @@ namespace TabsForWord.NativeHost
         // While the window size is changing the anchor is left alone (the strip keeps
         // following the window) - one adjustment after SizeSettleMs of quiet.
         private Size _lastClientSize;
-        private int _sizeQuietUntilTick;
+        private bool _sizeQuietActive;        // a quiet period is running (never judged by the tick alone:
+        private int _sizeQuietUntilTick;      // Environment.TickCount is negative for half of every 49.7 days)
+        private int _resizeBurstStartTick;    // first size change of the current burst (for the log)
+        private bool _settlePending;          // a size change has not been answered by an anchor fit yet
+
+        // Nothing else wakes the host when the quiet time ends: the WinEvents stop with the
+        // movement, and the ~1 Hz poll made the ruler wait up to a second after a snap or a
+        // maximise (measured: median 751 ms). This one-shot timer fires exactly then.
+        private Timer _settleTimer;
+        private bool _inUpdateLayout;         // re-entrancy guard (SetWindowPos on the anchor can pump messages)
 
         // Live background matching (bg=auto): the shade of the Word work area differs
         // between an active and an inactive window, so the colour is tracked per window.
@@ -89,6 +100,17 @@ namespace TabsForWord.NativeHost
         {
             _owner = owner;
             _wordTopLevel = wordTopLevel;
+
+            // "Long ago" for every interval check. A zero start value only works while
+            // Environment.TickCount is positive: from 24.9 to 49.7 days of uptime it is
+            // negative, "now - 0" is negative too, and, for example, the oscillation window
+            // below never reset - legitimate fits then added up over hours until the guard
+            // suspended and finally gave up the reservation for the session.
+            int longAgo = unchecked(Environment.TickCount - 3600000);
+            _lastLocateTick = longAgo;
+            _reserveWindowStartTick = longAgo;
+            _lastShiftLogTick = longAgo;
+            _lastBgSampleTick = longAgo;
         }
 
         public IntPtr WordWindowHandle { get { return _wordTopLevel; } }
@@ -145,6 +167,7 @@ namespace TabsForWord.NativeHost
                 WireStrip(_strip);
                 _strip.SetCollapsed(_owner.Collapsed);
                 _strip.SetActiveTabFlushBottom(true); // the document is right below - fill down to the line
+                _strip.SetNoActivateOnTabPress(true); // a press on a tab must not activate this window first
                 _surface.Controls.Add(_strip);
 
                 // Force the HWND into existence (WinForms parking), then move it into Word.
@@ -189,6 +212,16 @@ namespace TabsForWord.NativeHost
         public bool UpdateLayout()
         {
             if (_disposed) return true;
+            if (_inUpdateLayout)
+            {
+                // Re-entered from inside our own SetWindowPos on the anchor (Word's WM_SIZE
+                // handler may pump messages, and a queued WinEvent lands here). The outer pass
+                // has not recorded its bookkeeping yet - a nested one would shift the anchor
+                // twice. Finish the outer pass and look again right after it.
+                ArmSettleTimer(SettleSlackMs);
+                return true;
+            }
+            _inUpdateLayout = true;
             // All geometry is in physical pixels: Word may keep the thread in a
             // system-aware context where coordinates are virtualised, and the strip on a
             // "non-system" monitor would end up with the wrong scale.
@@ -231,7 +264,13 @@ namespace TabsForWord.NativeHost
                 if (clientSize != _lastClientSize)
                 {
                     if (!_lastClientSize.IsEmpty)
-                        _sizeQuietUntilTick = unchecked(Environment.TickCount + SizeSettleMs);
+                    {
+                        int changed = Environment.TickCount;
+                        if (!_settlePending) _resizeBurstStartTick = changed;
+                        _sizeQuietUntilTick = unchecked(changed + SizeSettleMs);
+                        _sizeQuietActive = true;
+                        _settlePending = true;
+                    }
                     _lastClientSize = clientSize;
                 }
 
@@ -268,9 +307,29 @@ namespace TabsForWord.NativeHost
                 // The anchor is only moved after the size has been quiet: while the frame is
                 // dragged Word re-lays out continuously anyway, and fighting it produces
                 // jitter and bursts of oscillation.
-                bool sizeSettled = unchecked(Environment.TickCount - _sizeQuietUntilTick) >= 0;
-                if (reserveActive && sizeSettled)
-                    EnsureAnchorPlacement(rect, naturalTop, anchorTop.Y, anchorRect);
+                int remaining = 0;
+                if (_sizeQuietActive)
+                {
+                    remaining = unchecked(_sizeQuietUntilTick - Environment.TickCount);
+                    if (remaining <= 0 || remaining > SizeSettleMs) { _sizeQuietActive = false; remaining = 0; }
+                }
+
+                if (!reserveActive)
+                {
+                    _settlePending = false;   // no fit will answer this resize (reserve paused or off)
+                }
+                else if (remaining <= 0)
+                {
+                    int settleMs = _settlePending ? unchecked(Environment.TickCount - _resizeBurstStartTick) : -1;
+                    _settlePending = false;
+                    EnsureAnchorPlacement(rect, naturalTop, anchorTop.Y, anchorRect, settleMs);
+                }
+                else
+                {
+                    // Come back exactly when the quiet time ends instead of waiting for the
+                    // next WinEvent or the ~1 Hz poll.
+                    ArmSettleTimer(remaining + SettleSlackMs);
+                }
                 return true;
             }
             catch (Exception ex)
@@ -281,6 +340,55 @@ namespace TabsForWord.NativeHost
             finally
             {
                 if (prevCtx != IntPtr.Zero) NativeWin32.SetThreadDpiAwarenessContextSafe(prevCtx);
+                _inUpdateLayout = false;
+            }
+        }
+
+        private void ArmSettleTimer(int dueMs)
+        {
+            if (_disposed) return;
+            try
+            {
+                if (_settleTimer == null)
+                {
+                    _settleTimer = new Timer();
+                    _settleTimer.Tick += OnSettleTimerTick;
+                }
+                _settleTimer.Stop();
+                _settleTimer.Interval = Math.Max(1, Math.Min(dueMs, 1000));
+                _settleTimer.Start();
+            }
+            catch (Exception ex)
+            {
+                LoggingService.Error("ArmSettleTimer failed", ex);
+            }
+        }
+
+        private void OnSettleTimerTick(object sender, EventArgs e)
+        {
+            try
+            {
+                var timer = _settleTimer;
+                if (timer != null) timer.Stop();
+                if (_disposed) return;
+
+                // The user is still dragging the window or its frame: the timer does not fit
+                // the anchor in the middle of a drag (every pause of the hand would make the
+                // page jump down by the strip height and back). The WinEvents of the movement
+                // keep doing what they always did; the timer only looks again shortly, so the
+                // ruler comes back right after the button is released. A held mouse button
+                // covers the drags Word's own thread does not run (a snap group divider
+                // dragged from the neighbouring window, window-management tools).
+                if (NativeWin32.IsInMoveSizeLoopSafe() || NativeWin32.IsMouseButtonDownSafe())
+                {
+                    ArmSettleTimer(MoveSizePollMs);
+                    return;
+                }
+                UpdateLayout();
+            }
+            catch (Exception ex)
+            {
+                LoggingService.Error("Settle timer tick failed", ex);
             }
         }
 
@@ -510,7 +618,7 @@ namespace TabsForWord.NativeHost
         /// three bursts in a row mean the window goes to overlay for good.
         /// </summary>
         private void EnsureAnchorPlacement(Rectangle panelRect, int naturalTop,
-            int anchorTopClientY, NativeWin32.RECT anchorScreenRect)
+            int anchorTopClientY, NativeWin32.RECT anchorScreenRect, int settleMs)
         {
             try
             {
@@ -569,11 +677,14 @@ namespace TabsForWord.NativeHost
                 _shiftedAnchorTopClient = desiredTop;
                 _naturalAnchorTopClient = naturalTop;
 
-                if (now - _lastShiftLogTick > 500)
+                // A fit that answers a resize is always logged, with its delay: that is the
+                // time the ruler stayed under the strip, measurable from a field log.
+                if (now - _lastShiftLogTick > 500 || settleMs >= 0)
                 {
                     _lastShiftLogTick = now;
                     LoggingService.Info("Reserve: anchor moved by " + delta + "px (word=0x" +
-                        _wordTopLevel.ToInt64().ToString("X") + ")");
+                        _wordTopLevel.ToInt64().ToString("X") + ")" +
+                        (settleMs >= 0 ? ", " + settleMs + " ms after the resize began" : ""));
                 }
             }
             catch (Exception ex)
@@ -904,6 +1015,12 @@ namespace TabsForWord.NativeHost
         {
             if (_disposed) return;
             _disposed = true;
+            var timer = _settleTimer;
+            _settleTimer = null;
+            if (timer != null)
+            {
+                try { timer.Stop(); timer.Tick -= OnSettleTimerTick; timer.Dispose(); } catch { }
+            }
             DestroySurface();
             LoggingService.Info("NativeTabHost destroyed: word=0x" + _wordTopLevel.ToInt64().ToString("X"));
         }

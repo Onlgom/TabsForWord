@@ -158,8 +158,11 @@ try {
     $log = Read-NewLog
     Step 'reserve stable after idle' (($wwf2.T -ge ($panel2.T + $panel2.H))) "wwfTop=$($wwf2.T) panelBottom=$($panel2.T + $panel2.H)"
     Step 'no oscillation give-up' (-not ($log -match 'Reserve mode disabled')) ''
-    $shiftCount = @($log -split "`n" | Where-Object { $_ -match 'Reserve: anchor shifted' }).Count
+    $shiftCount = @($log -split "`n" | Where-Object { $_ -match 'Reserve: anchor moved' }).Count
     Write-Host "anchor shift operations so far: $shiftCount"
+    # guards against this check silently matching nothing again (it counted a log line that
+    # no longer existed, so 'no fight loop' could never fail)
+    Step 'anchor fits are logged' ($shiftCount -ge 1) "shifts=$shiftCount"
 
     # resize window: reserve must re-apply without runaway
     $word.ActiveWindow.WindowState = 0
@@ -187,10 +190,11 @@ try {
     Start-Sleep -Seconds 2
 
     $log2 = Read-NewLog
-    $shiftTotal = @($log2 -split "`n" | Where-Object { $_ -match 'Reserve: anchor shifted' }).Count
+    $shiftTotal = @($log2 -split "`n" | Where-Object { $_ -match 'Reserve: anchor moved' }).Count
     Write-Host "total anchor shifts: $shiftTotal"
     Step 'shift count is bounded (no fight loop)' ($shiftTotal -lt 25) "shifts=$shiftTotal"
     Step 'no oscillation give-up (final)' (-not ($log2 -match 'Reserve mode disabled')) ''
+    Step 'no oscillation suspension' (-not ($log2 -match 'Reserve mode suspended')) ''
 
     foreach ($doc in @($word.Documents)) { $doc.Close([ref]0) }
     Start-Sleep -Seconds 2

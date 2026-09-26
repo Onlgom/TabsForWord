@@ -16,13 +16,15 @@ namespace TabsForWord
     {
         private readonly Action _nextTab;
         private readonly Action _prevTab;
+        private readonly Func<bool> _shouldHandle;   // null = always; false = the key goes on untouched
         private NativeMethods.HookProc _proc;   // GC root
         private IntPtr _hook = IntPtr.Zero;
 
-        public KeyboardHookService(Action nextTab, Action prevTab)
+        public KeyboardHookService(Action nextTab, Action prevTab, Func<bool> shouldHandle = null)
         {
             _nextTab = nextTab;
             _prevTab = prevTab;
+            _shouldHandle = shouldHandle;
         }
 
         /// <summary>Installs the hook. Must be called from Word UI thread.</summary>
@@ -54,7 +56,7 @@ namespace TabsForWord
                 {
                     bool ctrl = (NativeMethods.GetKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0;
                     bool alt = (NativeMethods.GetKeyState(NativeMethods.VK_MENU) & 0x8000) != 0;
-                    if (ctrl && !alt)
+                    if (ctrl && !alt && (_shouldHandle == null || _shouldHandle()))
                     {
                         // Bit 31 of lParam: 0 = key down, 1 = key up. We act on key down
                         // (auto-repeat included) and swallow the key up as well.
